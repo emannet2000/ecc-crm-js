@@ -1,0 +1,97 @@
+# ECC CRM
+
+Install dependencies with `npm install`, then run `npm start`. The default address is http://localhost:3000. Existing SQLite databases are migrated additively at startup; existing records are retained.
+
+To configure environment variables, copy `.env.example` to `.env`, supply the values, then run `node --env-file=.env server.js` (Node 22). `npm start` also accepts environment variables supplied by the hosting service or shell. Replace the demo credentials and development signing secret for a deployed instance.
+
+## Portals and access
+
+- `/portals` or `/#/portals`: portal chooser.
+- `/admin` or `/#/admin`: organization administration.
+- `/agent` or `/#/agent`: assigned-work workspace.
+- `/client` or `/#/client-login`: client sign-in; `/#/client` opens the signed-in client's application.
+- `/application.html`: public applicant form. `/#/apply` redirects here.
+- `/#/portal/<private-token>`: private customer invitation, available during proposal review and after conversion.
+
+Demo staff accounts use password `Test1234!`: `cristina@ecc.example` (agent/staff), `maria@ecc.example` (manager/approver), `admin@ecc.example` (administrator). The login screen no longer pre-fills these credentials.
+
+Permissions are enforced by the API, including direct record URLs, lists, lookups, task views, reports, and exports. Login routes automatically send each account to the matching portal.
+
+| Permission level | Access |
+| --- | --- |
+| ADMIN | Organization records, users, permissions, usage levels, pricing, agreement templates, email settings/status, billing |
+| MANAGER | Team records, reassignment, approvals, client activation, billing, cases and reports; no organization administration |
+| AGENT | Assigned leads and task-associated records, assessments, document reviews, draft proposals, tasks, cases and messages |
+| VIEWER | Assigned-record read access and reports; no record changes |
+| CLIENT | Own linked application, proposals, documents, messages, corrections and financial history |
+
+Legacy `staff` accounts map to AGENT; `approver` accounts map to MANAGER. An agent account can also be granted MANAGER or VIEWER access by an admin. Only admin accounts can have ADMIN access. Account changes, password resets and password changes revoke prior sessions. The last active admin cannot be deactivated or demoted. Client deactivation also revokes private portal links.
+
+An admin/manager activates client password sign-in from the lead record in PROPOSAL or CLIENT stage. Activation creates a one-time password setup link, valid for one hour, and queues an invitation email. A client account can own multiple explicitly linked applications; email addresses are unique across accounts. Private customer links remain supported independently of password sign-in and must be shared privately. Lead records store invitation-token hashes; queued invitation/reset emails necessarily contain the private URLs and are visible only to admins through the email queue.
+
+## Permission and usage administration
+
+The admin **Permissions & usage** screen provides preset usage levels, individual account overrides, monthly activity reports, document storage usage, and an organization-wide active-user limit. STANDARD starts with unlimited usage; no commercial subscription tiers or arbitrary quotas are assumed.
+
+Configurable limits are staff-created leads per UTC calendar month, document uploads per month, messages per month, and stored document megabytes. Zero blocks the action; blank inherits the preset for account overrides, or means unlimited for a preset. An explicit individual Unlimited override is supported. Failed requests do not consume usage. Caps are enforced on the server and return HTTP 429. Client storage limits include existing documents for the linked case; agent storage measures documents uploaded through that account. Public applicant intake remains available independently of staff-created-lead quotas. Active-user limits apply when creating or reactivating staff and client accounts. Updating a preset affects accounts using it immediately.
+
+## Workflow
+
+1. Applicants select one of five pathways, complete the applicable education/training/work/skills sections, confirm the declaration, draw or upload a signature, and submit into the CRM. Career Pathways and Direct Work Recruitment use WORK calculation while preserving the selected name. A destination selector supplies the calculation country. Successful submission creates a lead and initial assessment scheduling task. An idempotency key prevents duplicate profile submissions after a lost response. Download PDF Copy uses browser print/save-as-PDF; downloading alone does not submit. The older minimal public inquiry API remains supported.
+2. Agents record the interview date, notes and decision. The central **Task calendar** supports interviews, appointments, tasks, follow-ups, assignees, deadlines, scheduled times and progress. Notifications are queued for assignments and scheduled interviews.
+3. Initial document requirements have individual upload links and statuses: missing, pending, accepted, rejected or expired. A rejected document needs a reason. The latest linked upload determines each requirement's status. Managers/admins can approve the document set only when every active initial requirement has an accepted unexpired document. Existing unlinked documents can be associated with requirements through **Checklist / expiry**. Requirements appropriate to each immigration pathway are entered by ECC; eligibility is not automatically determined.
+4. The supplied 2026 UAE calculator tables cover six countries and four purposes. Staff can include/omit fees, change/reset ranges, select optional student/family expenses, enter quantities and agreed amounts, and choose items payable to ECC. Proof-of-funds and living-funds requirements cannot become ECC charges. Package suggestions and competitor benchmarks are owner-supplied internal references, not independently verified current fees or extra charges. Admins can draft, review and approve effective-dated rate versions; existing proposals retain their saved snapshots.
+5. Admins create and approve agreement template versions with service scope, payment conditions, exclusions, cancellation/refund terms and an ECC signatory. Staff can use an approved template or prepare complete custom sections for proposal approval. Customer contact/address details, quote, agreement text and optional dated installments are snapshotted. **Your actual approved agreement wording must be entered by ECC; the app does not invent or legally approve a contract.** Blank installment dates produce one full-payment installment due on conversion.
+6. Drafts can be edited. Approved/rejected proposals can be revised into a new numbered draft, preserving earlier versions and audit history. Managers/admins approve the current draft. **Send proposal to customer** queues an invitation and returns a private portal link. The customer accepts with their name and explicit confirmation, or requests changes. Acceptance is recorded against that revision. The customer then uploads that revision's signed agreement or electronically signs the revision for staff review. Applicant-profile signatures do not satisfy the signed-agreement requirement.
+7. Conversion is blocked until the assessment, every initial document, current proposal, customer acceptance and revision-linked uploaded or electronic signature meet the requirements. Conversion issues an invoice for ECC-payable items, creates installments, queues the client portal invitation and rotates the private link.
+8. After conversion, staff manage submission references, immigration authority, submission/decision dates, case decisions, requests, appointments and deadlines. Events can be client-visible or internal; internal case notes are excluded from the portal. Dated events create linked calendar tasks. Additional application documents can be requested separately from initial requirements.
+9. Billing supports additional itemized invoices, dated installments, partial payments, receipt numbers, printable invoices/receipts, partial refunds and invoice voiding. Refunds cannot exceed the original payment; refunds reopen the outstanding balance. An invoice with net payments must be refunded before it can be voided. Reusing a payment reference with the same details returns the original receipt rather than recording a duplicate. Manual billing records transactions without moving money. The separate hosted-payment adapter can charge or refund through Stripe after provider configuration and live acceptance.
+10. Applicants/clients and staff exchange messages and submit/review detail correction requests. Approved corrections update current contact details; original signed applicant profiles and proposal snapshots remain intact. Leads also support reassignment, possible duplicate flags by email/normalized phone, lost/disqualified/withdrawn/archive reasons, reopening, search, assignee filters and pagination.
+11. Dashboards and reports show assessments, outstanding documents, overdue work, staff workload, conversion counts, outcomes, country demand and financial totals grouped by currency. CSV exports protect spreadsheet formula cells. Admins/managers see team results; agents/viewers see their accessible records.
+
+Uploads support PDF, JPEG and PNG up to 5 MB each, stored in SQLite. Profile signatures are PNG data up to 1 MB. The supplied application sources were duplicated; this implementation uses a single copy. `ecc-logo.jpeg` was not supplied, so the applicant form uses an ECC text mark.
+
+## Email delivery
+
+Notifications are durably queued for inquiry acknowledgments, appointments, document requests/rejections, proposals, portal/account invitations, receipts, refunds, application updates, messages and reminders. The admin **Email** screen shows queue status, attempts, previews, failures and retry controls. Queued messages remain queued while delivery is unconfigured.
+
+Configure one provider and a verified/authorized sender:
+
+- Resend: `EMAIL_PROVIDER=resend`, `EMAIL_FROM`, `RESEND_API_KEY`.
+- An existing HTTP mail gateway: `EMAIL_PROVIDER=webhook`, `EMAIL_FROM`, `EMAIL_WEBHOOK_URL`, and optional `EMAIL_WEBHOOK_TOKEN`.
+
+The gateway receives JSON `{from,to,subject,text,idempotency_key}` with an optional bearer authorization header. It should honor the idempotency key to avoid duplicate emails. Resend uses its documented send-email API and `Idempotency-Key` header: [API reference](https://resend.com/docs/api-reference/emails/send-email), [idempotency behavior](https://resend.com/docs/dashboard/emails/idempotency-keys). Provider success means accepted by the provider, not confirmed inbox delivery.
+
+Set `PUBLIC_BASE_URL` to the externally reachable HTTPS origin so emails contain correct links. On the running server, the queue worker processes an email every five seconds; a reminder sweep runs every minute. Failed sends retry with backoff, up to five attempts, and can be manually retried. Daily reminder keys prevent repeated sweeps from creating duplicate task/document/installment reminders. The server must be running for timers to execute. These are delivery adapters and an outbox, not a configured mail account; no live email was sent during tests.
+
+## Validation
+
+Run `npm test`. Tests use isolated temporary databases and exercise the HTTP app directly without a listening port. Coverage includes the inquiry-to-client flow, template/revision/customer acceptance gates, requirement matching and expiry, invoices/installments/refunds, case privacy, messages/corrections, pricing snapshots, reporting, accounts/resets, role and record isolation (including encoded URLs), usage quotas, user limits, email delivery/retry mocks, legacy migrations, and screen rendering/script syntax.
+
+Full interactive browser verification remains unavailable in the sandbox: network listeners are restricted and headless Firefox cannot start. Signature drawing, mobile layouts and print pagination therefore still need an interactive browser check. Live provider delivery also needs the actual email credentials and sender configuration.
+
+## Additional release features
+
+The client portal now supports **multiple applications per account** with a scoped application switcher. A manager can explicitly link a second application to an existing active client account with the same email; unrelated applications remain inaccessible. Client usage and storage quotas apply across linked applications. Deactivation revokes private links for all linked applications.
+
+Clients can **electronically sign** an accepted proposal revision, with explicit consent, a signature image, immutable proposal snapshot, SHA-256 content fingerprint and timestamp. Staff review is still required before conversion. The signed record is downloadable as printable HTML; the application makes no qualified-signature-provider claim. Uploading a physically signed agreement remains available.
+
+**Authenticator MFA** and one-time recovery codes are available in My account. Email activation/verification links are recipient-bound, single-use and expiring. Existing unverified client accounts must verify before password sign-in. Contact-email correction requests update case contact information; login email is managed separately in account administration.
+
+**Operations** now includes configuration checks, an encrypted backup scheduler, isolated restore exercises, recent errors, payment reconciliation state and a live email-test queue. Country requirements have source-linked template versions and review dates. Pricing source review found discrepancies and incomplete verification; see [source findings](deploy/FEE-REVIEW.md). The original AED ranges are retained as supplied estimates until ECC approves updated rates.
+
+A **Stripe hosted checkout/refund adapter** is prepared. It verifies raw signed webhooks, deduplicates events and receipts, checks invoice amount/currency/balance, and records successful refunds. It is inactive until provider credentials are configured; tests use mocks, not real charges.
+
+See [production setup and remaining live checks](deploy/PRODUCTION.md) for HTTPS hosting, private configuration, administrator bootstrap, backups/recovery, provider setup and browser acceptance. No deployment, live email receipt, live payment, or browser acceptance is claimed by the automated tests.
+
+## Import, automation and business tools
+
+Administrators can open **Import & automation** for CSV/Excel import, reviewed duplicate-inquiry merging and configurable follow-up/assignment rules. **Business tools** provides appointment slots and booking, recruitment/admissions tracking, a scoped client-message inbox, saved grouped reports, stage durations, collections forecasts and points assessments. Administrators also have bank reconciliation, commission estimates, privacy review/exports, translated email templates, destination pricing drafts and custom pathway names. Client portals include appointment booking and cancellation.
+
+Optional local malware scanning, OCR and PDF text extraction are available through **Business tools → Document processing**. These processors require host configuration; unconfigured scanning is explicitly reported. See the [capability matrix and remaining dependencies](deploy/FEATURE-STATUS.md) for exact limits, configuration and verification status. Live third-party messaging, mailbox/calendar/accounting synchronization, interface translations, automated privacy erasure and external identity services remain dependent on ECC's provider, language and retention-policy decisions.
+
+## Advanced workflows
+
+**Advanced workflows** adds progressed-case reconciliation, recurring step/escalation workflows, weighted forecasts, scheduled reports, a receipt-time commission ledger, policy-controlled privacy removal/legal holds, qualification matching/supporting documents, document-field corrections, language administration and a provider gateway integration hub. Read [advanced capability details and remaining provider work](deploy/ADVANCED-FEATURES.md) before enabling these features. Provider-specific adapters, account authorization and actual approved translations/policies are not supplied by selecting a provider or language name.
+
+Staff now have a dedicated **Clients** navigation entry (`/#/clients`, also `/clients`) showing converted records with the same assignment permissions, search and pagination. Open a lead and use **Convert lead to client** near its heading to review the conversion checklist. Only a manager/administrator can complete conversion, after the proposal, assessment, documents, customer acceptance and revision-linked signature requirements are met. The checklist and conversion action use the same server-side readiness checks. Client password-account activation remains a separate invitation/setup action on the record.

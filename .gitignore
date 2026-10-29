@@ -1,0 +1,47 @@
+
+# Secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Local databases and SQLite journals
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+
+# Runtime files, client uploads and backups
+var/
+uploads/
+backups/
+*.log
+.env
+.env.*.local
+ecc.db*
+var/
+backups/
+*.sqlite
+*.sqlite-*
+*.enc
+test-results/
+
+node_modules/
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+var/
+uploads/
+backups/
+*.log

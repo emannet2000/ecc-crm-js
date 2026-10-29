@@ -1,0 +1,1 @@
+const Database=require('better-sqlite3');(async()=>{const db=new Database(process.env.DB||'ecc.db',{fileMustExist:true});try{const backup=require('../backup-service')(db),result=await backup.create();console.log(JSON.stringify(result))}finally{db.close()}})().catch(e=>{console.error(e.message);process.exitCode=1});

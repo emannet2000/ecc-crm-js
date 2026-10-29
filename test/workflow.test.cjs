@@ -1,0 +1,94 @@
+const {test}=require('node:test');
+const assert=require('node:assert/strict');
+const {mkdtempSync,rmSync,readFileSync}=require('node:fs');
+const {tmpdir}=require('node:os');
+const path=require('node:path');
+
+test('inquiry to approved proposal, client portal, documents and payment history',async t=>{
+ const dir=mkdtempSync(path.join(tmpdir(),'ecc-workflow-'));
+ process.env.DB=path.join(dir,'workflow.db');process.env.JWT_SECRET='integration-only-secret';
+ const {app,db}=require('../server');
+ t.after(()=>{db.close();rmSync(dir,{recursive:true,force:true})});
+ const {Duplex}=require('node:stream'),{IncomingMessage,ServerResponse}=require('node:http');
+ async function raw(p,{token,portal,method='GET',body}={}){return new Promise((resolve,reject)=>{
+  const input=body?JSON.stringify(body):'';
+  const socket=new Duplex({read(){},write(c,e,cb){cb()}});socket.remoteAddress='127.0.0.1';const q=new IncomingMessage(socket);q.complete=true;q.push(input||null);if(input)q.push(null);
+  q.method=method;q.url='/v1'+p;q.headers={'content-type':'application/json','content-length':Buffer.byteLength(input),...(token?{authorization:'Bearer '+token}:{}),...(portal?{'x-portal-token':portal}:{})};
+  const res=new ServerResponse(q),chunks=[];res.write=c=>{chunks.push(Buffer.from(c));return true};res.end=c=>{if(c)chunks.push(Buffer.from(c));resolve({status:res.statusCode,text:Buffer.concat(chunks).toString()});return res};
+  app.handle(q,res,reject);
+ })}
+ async function req(p,opts={}){const r=await raw(p,opts),b=JSON.parse(r.text);assert.equal(r.status,opts.status||200,JSON.stringify(b));return b}
+ const staff=(await req('/auth/login',{method:'POST',body:{email:'cristina@ecc.example',password:'Test1234!'}})).token;
+ const admin=(await req('/auth/login',{method:'POST',body:{email:'admin@ecc.example',password:'Test1234!'}})).token;
+ const profile={'Selected Pathway':'International Student','Full Name':'Cristina Example','Email Address':'client@example.test','Phone Number':'+971500000000',Citizenship:'Filipino',City:'Manila',Country:'Philippines',Date:'2026-10-29','Declaration Confirmed':'Yes','Study Pathway - Planned Course to Study':'Computer Science','Language Test Taken':'IELTS','Language Test Band Score':'7','Training - Name':'Hidden training must not persist'};
+ const signature=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+j5NsAAAAASUVORK5CYII=','base64');
+ const application={full_name:'Cristina Example',email:'client@example.test',country_of_interest:'Canada',application_type:'STUDY',profile,signature_data:'data:image/png;base64,'+signature.toString('base64'),submission_id:'12345678901234567890123456789012'};
+ await req('/public/inquiries',{method:'POST',body:{...application,signature_data:''},status:400});
+ await req('/public/inquiries',{method:'POST',body:{...application,profile:{...profile,'Declaration Confirmed':'No'}},status:400});
+ await req('/public/inquiries',{method:'POST',body:{...application,application_type:'WORK'},status:400});
+ const first=await req('/public/inquiries',{method:'POST',body:application,status:201});
+ const retry=await req('/public/inquiries',{method:'POST',body:application,status:201});assert.equal(retry.reference_no,first.reference_no);
+ await req('/public/inquiries',{method:'POST',body:{...application,profile:{...profile,City:'Quezon City'}},status:409});
+ assert.equal((await req('/leads',{token:staff})).total,1);
+
+ const id=(await req('/leads',{token:staff})).rows[0].id;
+ const wp='/workflow/'+id;
+ const applicant=await req(wp+'/applicant-profile',{token:staff});assert.equal(applicant.profile['Full Name'],'Cristina Example');assert.equal(applicant.profile['Training - Name'],undefined);assert.equal(applicant.profile['Study Pathway - Planned Country of Study'],'Canada');assert.equal(applicant.signature_data,application.signature_data);
+ await req(wp+'/applicant-profile',{status:401});
+ assert.equal((await req(wp+'/calculator',{token:staff})).title,'International Student Pathway');
+
+ await req(wp+'/convert',{token:admin,method:'POST',body:{},status:400});
+ await req('/leads/'+id,{token:admin,method:'PATCH',body:{status:'CLIENT'},status:400});
+ await req(wp+'/assessment',{token:staff,method:'POST',body:{date:'2026-10-29',notes:'Initial assessment passed',approved:true}});
+ await req(wp+'/requirements',{token:staff,method:'POST',body:{titles:['Passport'],deadline:'2026-11-01'}});
+ const lead=await req('/leads/'+id,{token:staff});
+ await req('/tasks/'+lead.tasks[0].id,{token:staff,method:'PATCH',body:{title:'Schedule initial assessment interview',due_date:'2026-11-02',status:'IN_PROGRESS'}});
+ await req('/tasks/'+lead.tasks[0].id,{token:staff,method:'PATCH',body:{title:''},status:400});
+ await req(wp+'/documents-approve',{token:admin,method:'POST',body:{},status:400});
+ const requirement=(await req(wp,{token:staff})).requirements[0];
+ const file={requirement_id:requirement.id,name:'passport.pdf',mime:'application/pdf',data:Buffer.from('%PDF-1.4\nTest sample').toString('base64'),kind:'INITIAL'};
+ await req(wp+'/documents',{token:staff,method:'POST',body:{...file,data:Buffer.from('not pdf').toString('base64')},status:400});
+ await req(wp+'/documents',{token:staff,method:'POST',body:file,status:201});
+ let d=await req(wp,{token:staff});
+ await req(wp+'/documents/'+d.documents[0].id,{token:staff,method:'PATCH',body:{status:'ACCEPTED',notes:'Checked passport'}});
+ await req(wp+'/documents-approve',{token:staff,method:'POST',body:{},status:403});
+ await req(wp+'/documents-approve',{token:admin,method:'POST',body:{}});
+ const calc=require('../public/visa-calculator');const selections=calc.catalog('Canada','STUDY').rows.filter(r=>r.numeric).map(r=>({key:r.key,included:['base0','base7','addon-gicProofOfFunds'].includes(r.key),amount:r.key==='base7'?1200:r.key==='addon-gicProofOfFunds'?55000:300}));
+ await req(wp+'/proposals',{token:staff,method:'POST',body:{calculator:selections.map(r=>r.key==='base0'?{...r,low:500,high:200}:r),terms:'Invalid bounds'},status:400});
+ await req(wp+'/proposals',{token:staff,method:'POST',body:{calculator:selections,terms:'Services and payment terms. Customer signs here.',agreement:{sections:{service_scope:'Document and application support',payment_schedule:'Pay the ECC service charge on acceptance',exclusions:'Third-party charges and proof of funds are paid separately',cancellation_terms:'Cancellation terms as agreed with ECC',ecc_signatory:'ECC Admin'}},estimate:{payable_cents:1}},status:201});
+ d=await req(wp,{token:staff});
+ assert.equal(d.proposals[0].estimate.payable_cents,120000);assert.equal(d.proposals[0].estimate.quote_total_cents,5650000);
+ assert.equal(d.proposals[0].country,'Canada');assert.equal(d.proposals[0].purpose,'STUDY');
+ await req(wp+'/proposals/'+d.proposals[0].id+'/decision',{token:staff,method:'POST',body:{status:'APPROVED'},status:403});
+ await req(wp+'/proposals/'+d.proposals[0].id+'/decision',{token:admin,method:'POST',body:{status:'APPROVED'}});
+ const proposalId=d.proposals[0].id;const proposalLink=await req(wp+'/proposals/'+proposalId+'/send',{token:staff,method:'POST',body:{}});
+ await req('/portal/proposals/'+proposalId+'/decision',{portal:proposalLink.portal_path.split('/').pop(),method:'POST',body:{status:'ACCEPTED',name:'Cristina Example',confirmed:true}});
+ await req(wp+'/convert',{token:admin,method:'POST',body:{},status:400});
+ await req(wp+'/documents',{token:staff,method:'POST',body:{...file,name:'signed-agreement.pdf',kind:'SIGNED_AGREEMENT',requirement_id:null,proposal_id:proposalId},status:201});
+ d=await req(wp,{token:staff});
+ await req(wp+'/documents/'+d.documents.find(d=>d.kind==='SIGNED_AGREEMENT').id,{token:staff,method:'PATCH',body:{status:'ACCEPTED',notes:'Signature verified'}});
+ const link=await req(wp+'/convert',{token:admin,method:'POST',body:{}}),portal=link.portal_path.split('/').pop();
+ d=await req('/portal',{portal});assert.equal(d.full_name,'Cristina Example');assert.equal(d.charges[0].balance_cents,120000);assert.equal(d.portal_hash,undefined);assert.equal(d.notes,undefined);
+ const clientProfile=await req('/portal/profile',{portal});assert.equal(clientProfile.profile['Full Name'],'Cristina Example');assert.equal(clientProfile.signature_data,application.signature_data);
+ await req('/portal',{portal:'0'.repeat(64),status:401});
+ await req('/portal/profile',{portal:'0'.repeat(64),status:401});
+ await req(wp+'/application-status',{token:staff,method:'PATCH',body:{stage:'SUBMITTED'}});
+ assert.equal((await req('/portal',{portal})).application_stage,'SUBMITTED');
+ await req(wp+'/payments',{token:staff,method:'POST',body:{charge_id:d.charges[0].id,amount:500,reference:'R-001',paid_at:'2026-10-29'},status:403});
+ await req(wp+'/payments',{token:admin,method:'POST',body:{charge_id:d.charges[0].id,amount:500,reference:'R-001',paid_at:'2026-10-29'},status:201});
+ d=await req('/portal',{portal});assert.equal(d.charges[0].balance_cents,70000);assert.equal(d.charges[0].payments.length,1);
+ await req(wp+'/payments',{token:admin,method:'POST',body:{charge_id:d.charges[0].id,amount:700.01,reference:'R-002',paid_at:'2026-10-29'},status:400});
+ await req('/portal/documents',{portal,method:'POST',body:{...file,kind:'APPLICATION',requirement_id:null},status:201});
+ const foreign=await req('/public/inquiries',{method:'POST',body:{full_name:'Other client',email:'other@example.test',country_of_interest:'Spain',application_type:'TOURIST'},status:201});
+ const other=(await req('/leads',{token:staff})).rows.find(l=>l.reference_no===foreign.reference_no);
+ await req('/workflow/'+other.id+'/documents',{token:staff,method:'POST',body:{...file,kind:'APPLICATION',requirement_id:null},status:201});
+ const otherDoc=(await req('/workflow/'+other.id,{token:staff})).documents[0];
+ await req('/portal/documents/'+otherDoc.id,{portal,status:404});
+ const download=await raw('/portal/documents/'+d.documents[0].id,{portal});assert.equal(download.status,200);assert.equal(download.text,'%PDF-1.4\nTest sample');
+ const replacement=await req(wp+'/portal-link',{token:admin,method:'POST',body:{}});
+ await req('/portal',{portal,status:401});await req('/portal',{portal:replacement.portal_path.split('/').pop()});
+ // Ensure both browser scripts parse, including the existing inline application.
+ const vm=require('node:vm');const html=readFileSync(path.join(__dirname,'../public/index.html'),'utf8');
+ for(const m of html.matchAll(/<script>([\s\S]*?)<\/script>/g))new vm.Script(m[1]);
+ for(const name of ['workflow.js','pricing-data.js','visa-calculator.js','proposal-calculator.js','application-schema.js','application.js','workspace.js','release.js'])new vm.Script(readFileSync(path.join(__dirname,'../public/'+name),'utf8'));
+});

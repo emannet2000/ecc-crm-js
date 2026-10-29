@@ -1,0 +1,20 @@
+{
+  "name": "ecc-crm",
+  "version": "0.1.0",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test test/*.test.cjs",
+    "production:prepare": "node scripts/prepare-production.cjs",
+    "security:bootstrap": "node scripts/bootstrap-admin.cjs",
+    "backup": "node scripts/backup.cjs",
+    "restore": "node scripts/restore.cjs",
+    "test:browser": "node scripts/browser-acceptance.cjs"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "better-sqlite3": "^11.3.0",
+    "exceljs": "^4.4.0",
+    "express": "^4.19.2",
+    "jsonwebtoken": "^9.0.2"
+  }
+}

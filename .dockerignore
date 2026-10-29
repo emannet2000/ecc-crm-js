@@ -1,0 +1,10 @@
+node_modules
+.git
+.env*
+ecc.db*
+var
+backups
+*.sqlite
+*.sqlite-*
+*.enc
+test-results

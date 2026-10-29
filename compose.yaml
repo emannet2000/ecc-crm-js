@@ -1,0 +1,28 @@
+services:
+  app:
+    build: .
+    env_file: .env.production.local
+    restart: unless-stopped
+    expose: ["3000"]
+    volumes:
+      - ecc_data:/app/var
+      - ecc_backups:/app/backups
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+  proxy:
+    image: caddy:2
+    restart: unless-stopped
+    environment:
+      CADDY_DOMAIN: ${CADDY_DOMAIN:?Set CADDY_DOMAIN to your real public hostname}
+    ports: ["80:80", "443:443"]
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on: [app]
+volumes:
+  ecc_data:
+  ecc_backups:
+  caddy_data:
+  caddy_config:
