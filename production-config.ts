@@ -1,0 +1,15 @@
+import type { Database, Audit, Auth, Services, HttpRequest, HttpResponse, HttpNext } from './types/runtime';
+import type { Router } from 'express';
+const bcrypt = require('bcryptjs') as typeof import('bcryptjs');
+function issues(db: Database) { const list = []; if (!process.env.JWT_SECRET || process.env.JWT_SECRET.length < 32 || process.env.JWT_SECRET === 'dev-secret-change-me')
+    list.push('PRIVATE_JWT_SECRET_REQUIRED'); if (!/^https:\/\//.test(process.env.PUBLIC_BASE_URL || '') || /example\.(com|test)/.test(process.env.PUBLIC_BASE_URL || ''))
+    list.push('PUBLIC_HTTPS_URL_REQUIRED'); for (const k of ['MFA_ENCRYPTION_KEY', 'BACKUP_ENCRYPTION_KEY'])
+    if (!/^[a-f0-9]{64}$/i.test(process.env[k] || ''))
+        list.push(k + '_REQUIRED'); if (db && db.prepare('SELECT password_hash FROM users WHERE is_active=1').all().some(u => bcrypt.compareSync('Test1234!', u.password_hash)))
+    list.push('ACTIVE_DEMO_PASSWORDS_MUST_BE_REPLACED'); return list; }
+const service = { issues, assert(db: Database) { if (process.env.NODE_ENV === 'production') {
+        const errors = issues(db);
+        if (errors.length)
+            throw Error('PRODUCTION_NOT_READY: ' + errors.join(', '));
+    } } };
+export = service;

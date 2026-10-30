@@ -7,7 +7,7 @@ const path=require('node:path');
 test('inquiry to approved proposal, client portal, documents and payment history',async t=>{
  const dir=mkdtempSync(path.join(tmpdir(),'ecc-workflow-'));
  process.env.DB=path.join(dir,'workflow.db');process.env.JWT_SECRET='integration-only-secret';
- const {app,db}=require('../server');
+ const {app,db}=require('../dist/server');
  t.after(()=>{db.close();rmSync(dir,{recursive:true,force:true})});
  const {Duplex}=require('node:stream'),{IncomingMessage,ServerResponse}=require('node:http');
  async function raw(p,{token,portal,method='GET',body}={}){return new Promise((resolve,reject)=>{
@@ -53,7 +53,7 @@ test('inquiry to approved proposal, client portal, documents and payment history
  await req(wp+'/documents/'+d.documents[0].id,{token:staff,method:'PATCH',body:{status:'ACCEPTED',notes:'Checked passport'}});
  await req(wp+'/documents-approve',{token:staff,method:'POST',body:{},status:403});
  await req(wp+'/documents-approve',{token:admin,method:'POST',body:{}});
- const calc=require('../public/visa-calculator');const selections=calc.catalog('Canada','STUDY').rows.filter(r=>r.numeric).map(r=>({key:r.key,included:['base0','base7','addon-gicProofOfFunds'].includes(r.key),amount:r.key==='base7'?1200:r.key==='addon-gicProofOfFunds'?55000:300}));
+ const calc=require('../dist/shared/visa-calculator');const selections=calc.catalog('Canada','STUDY').rows.filter(r=>r.numeric).map(r=>({key:r.key,included:['base0','base7','addon-gicProofOfFunds'].includes(r.key),amount:r.key==='base7'?1200:r.key==='addon-gicProofOfFunds'?55000:300}));
  await req(wp+'/proposals',{token:staff,method:'POST',body:{calculator:selections.map(r=>r.key==='base0'?{...r,low:500,high:200}:r),terms:'Invalid bounds'},status:400});
  await req(wp+'/proposals',{token:staff,method:'POST',body:{calculator:selections,terms:'Services and payment terms. Customer signs here.',agreement:{sections:{service_scope:'Document and application support',payment_schedule:'Pay the ECC service charge on acceptance',exclusions:'Third-party charges and proof of funds are paid separately',cancellation_terms:'Cancellation terms as agreed with ECC',ecc_signatory:'ECC Admin'}},estimate:{payable_cents:1}},status:201});
  d=await req(wp,{token:staff});

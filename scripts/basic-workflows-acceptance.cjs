@@ -1,0 +1,94 @@
+const fs=require('node:fs/promises'),os=require('node:os'),path=require('node:path'),crypto=require('node:crypto');
+const assert=require('node:assert/strict');
+const {chromium}=require('@playwright/test');
+(async()=>{
+ const temp=await fs.mkdtemp(path.join(os.tmpdir(),'ecc-basic-workflow-audit-'));let db,server,browser;
+ try{
+  process.env.DB=path.join(temp,'audit.db');process.env.NODE_ENV='test';process.env.JWT_SECRET='isolated-workflow-audit-secret';process.env.EMAIL_PROVIDER='';process.env.PAYMENT_PROVIDER='';
+  const crm=require('../dist/server');db=crm.db;
+  server=await new Promise(resolve=>{const s=crm.app.listen(0,'127.0.0.1',()=>resolve(s))});const base='http://127.0.0.1:'+server.address().port;
+  browser=await chromium.launch({headless:true,args:['--disable-gpu','--disable-software-rasterizer','--ozone-platform=headless'],...(process.env.CHROMIUM_PATH?{executablePath:process.env.CHROMIUM_PATH}:{})});
+  const context=await browser.newContext(),page=await context.newPage();
+  await page.goto(base+'/#/login');await page.locator('[name=email]').fill('admin@ecc.example');await page.locator('[name=password]').fill('Test1234!');await page.getByRole('button',{name:'Sign In',exact:true}).click();await page.getByRole('heading',{name:'Application Pipeline',exact:true}).waitFor();
+  await page.goto(base+'/#/clients');assert.equal(await page.getByRole('button',{name:'New Client',exact:true}).count(),0);await page.getByText('Clients appear here after conversion.',{exact:false}).waitFor();await page.getByRole('button',{name:'New Application',exact:true}).click();
+  const dialog=page.getByRole('dialog');await dialog.getByText('This creates an inquiry in Leads.',{exact:false}).waitFor();await dialog.locator('[name=full_name]').fill('Basic workflow audit client');await dialog.locator('[name=email]').fill('basic-workflow-audit@example.test');
+  await dialog.getByRole('button',{name:'Create Application',exact:true}).click();await page.getByRole('heading',{name:'Basic workflow audit client',exact:true}).waitFor();
+  const created=db.prepare('SELECT id,status FROM leads WHERE email=?').get('basic-workflow-audit@example.test');
+  await page.goto(base+'/#/clients');await page.getByRole('heading',{name:'Clients',level:1,exact:true}).waitFor();await page.getByText('No records to show.',{exact:true}).waitFor();
+  assert.equal(created.status,'INQUIRY');await page.goto(base+'/#/leads');await page.getByRole('button',{name:db.prepare('SELECT reference_no FROM leads WHERE id=?').get(created.id).reference_no,exact:true}).waitFor();
+  const magic=crypto.randomBytes(32).toString('hex');db.prepare("UPDATE leads SET status='CLIENT',portal_hash=? WHERE id=?").run(crypto.createHash('sha256').update(magic).digest('hex'),created.id);
+  await page.goto(base+'/#/clients');await page.getByRole('button',{name:'Edit Client',exact:true}).click();const clientEditor=page.getByRole('dialog',{name:'Edit Client',exact:true});
+  assert.equal(await clientEditor.getByLabel('Full name',{exact:true}).isEnabled(),true);assert.equal(await clientEditor.getByRole('combobox',{name:'Country of interest',exact:true}).isDisabled(),true);
+  await clientEditor.getByLabel('Age',{exact:true}).fill('28');await clientEditor.getByLabel('Nationality',{exact:true}).fill('Filipino');for(const field of ['First name','Middle name','Last name'])await clientEditor.getByLabel(field,{exact:true}).waitFor();await clientEditor.getByLabel('Phone',{exact:true}).fill('+63 918 123 4567');await clientEditor.getByRole('button',{name:'Save Client',exact:true}).click();await clientEditor.waitFor({state:'hidden'});await page.getByRole('status').filter({hasText:'Client details saved.'}).waitFor();
+  assert.deepEqual(db.prepare('SELECT age,nationality FROM leads WHERE id=?').get(created.id),{age:28,nationality:'Filipino'});
+  assert.equal(db.prepare('SELECT phone FROM leads WHERE id=?').get(created.id).phone,'+63 918 123 4567');
+  await page.getByRole('button',{name:'Edit Client',exact:true}).click();assert.equal(await page.getByRole('dialog',{name:'Edit Client',exact:true}).getByLabel('Phone',{exact:true}).inputValue(),'+63 918 123 4567');await page.getByRole('dialog',{name:'Edit Client',exact:true}).getByRole('button',{name:'Close dialog',exact:true}).click();
+  await page.goto(base+'/#/lead/'+created.id);await page.getByRole('button',{name:'Edit Client',exact:true}).click();await page.getByRole('dialog',{name:'Edit Client',exact:true}).getByRole('button',{name:'Close dialog',exact:true}).click();
+  const anonymous=await browser.newContext(),portal=await anonymous.newPage();
+  await portal.goto(base+'/#/portal/'+magic);await portal.getByRole('heading',{name:'Basic workflow audit client',exact:true}).waitFor();
+  await portal.getByRole('navigation',{name:'Main navigation'}).getByRole('link',{name:'Documents',exact:true}).click();
+  await portal.getByRole('heading',{name:'Document Library',exact:true}).waitFor();
+  assert.equal((await portal.evaluate(()=>location.hash)).includes(magic),true);
+  await page.goto(base+'/#/lead/'+created.id);await page.getByRole('button',{name:'Manage Application',exact:true}).click();
+  await page.getByRole('dialog').getByRole('button',{name:'Close dialog',exact:true}).click();await page.getByRole('button',{name:'Application',exact:true}).click();
+  for(const [action,section]of [['Upload Documents','Documents'],['View Proposals','Proposals'],['Message Client','Messages']]){
+   await page.getByRole('button',{name:action,exact:true}).click();const quick=page.getByRole('dialog',{name:'Manage application',exact:true});
+   await quick.locator('.native-workspace > .tabs button.active').filter({hasText:section}).waitFor();assert.equal(await quick.locator('#caseForm').count(),0);
+   if(section==='Documents')await quick.locator('#uploadForm').waitFor();if(section==='Messages')await quick.locator('#messageForm').waitFor();
+   await quick.getByRole('button',{name:'Close dialog',exact:true}).click();
+  }
+  await page.getByRole('button',{name:'Manage Case',exact:true}).click();
+  const workspace=page.getByRole('dialog');await workspace.getByRole('button',{name:'Case',exact:true}).click();
+  const caseForm=workspace.locator('#caseForm');await caseForm.getByRole('combobox',{name:'Decision',exact:true}).selectOption('APPROVED');await caseForm.getByLabel('Decision date',{exact:true}).fill('2026-02-01');
+  let saved=page.waitForResponse(r=>r.url().endsWith('/case')&&r.request().method()==='PATCH');await caseForm.getByRole('button',{name:'Save Case Details',exact:true}).click();if(!(await saved).ok())throw Error('Approved decision save failed');
+  await caseForm.getByRole('button',{name:'Save Case Details',exact:true}).waitFor({state:'visible'});
+  await caseForm.getByRole('combobox',{name:'Decision',exact:true}).selectOption('PENDING');await caseForm.getByLabel('Decision date',{exact:true}).fill('');
+  saved=page.waitForResponse(r=>r.url().endsWith('/case')&&r.request().method()==='PATCH');await caseForm.getByRole('button',{name:'Save Case Details',exact:true}).click();if(!(await saved).ok())throw Error('Pending decision save failed');
+  assert.deepEqual(db.prepare('SELECT c.decision,l.application_stage FROM case_records c JOIN leads l ON l.id=c.lead_id WHERE l.id=?').get(created.id),{decision:'PENDING',application_stage:'PREPARATION'});
+  await caseForm.getByRole('combobox',{name:'Decision',exact:true}).selectOption('REFUSED');await caseForm.getByLabel('Decision date',{exact:true}).fill('2026-02-01');
+  saved=page.waitForResponse(r=>r.url().endsWith('/case')&&r.request().method()==='PATCH');await caseForm.getByRole('button',{name:'Save Case Details',exact:true}).click();assert.equal((await saved).ok(),true);
+  await workspace.getByRole('button',{name:'Overview',exact:true}).click();
+  const stages=await workspace.getByRole('combobox',{name:'Application stage',exact:true}).locator('option').evaluateAll(options=>options.map(o=>o.value));assert.deepEqual(stages,['REFUSED','CLOSED']);
+  const invalid=await page.evaluate(async(id)=>{const r=await fetch('/v1/workflow/'+id+'/application-status',{method:'PATCH',headers:{'Content-Type':'application/json',Authorization:'Bearer '+localStorage.tok},body:JSON.stringify({stage:'APPROVED'})});return {status:r.status,body:await r.json()}},created.id);
+  assert.equal(invalid.status,400);assert.equal(invalid.body.error,'UPDATE_CASE_DECISION_BEFORE_CHANGING_OUTCOME');
+  await workspace.getByRole('button',{name:'Review Case Decision',exact:true}).click();await caseForm.waitFor();await caseForm.getByRole('combobox',{name:'Decision',exact:true}).selectOption('PENDING');await caseForm.getByLabel('Decision date',{exact:true}).fill('');
+  saved=page.waitForResponse(r=>r.url().endsWith('/case')&&r.request().method()==='PATCH');await caseForm.getByRole('button',{name:'Save Case Details',exact:true}).click();assert.equal((await saved).ok(),true);
+
+  await workspace.getByRole('button',{name:'Close dialog',exact:true}).click();await page.reload();await page.getByRole('button',{name:'Manage Application',exact:true}).click();await page.getByRole('dialog').getByRole('combobox',{name:'Application stage',exact:true}).waitFor();assert.equal(await page.getByRole('dialog').getByRole('combobox',{name:'Application stage',exact:true}).inputValue(),'PREPARATION');
+  async function staffPost(route,body){
+   const result=await page.evaluate(async({route,body})=>{const r=await fetch('/v1'+route,{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer '+localStorage.tok},body:JSON.stringify(body)});return {status:r.status,body:await r.json()}},{route,body});
+   assert.ok([200,201].includes(result.status),JSON.stringify(result));return result.body;
+  }
+  await staffPost('/workflow/'+created.id+'/assignment',{assigned_to:1});await page.reload();await page.getByRole('button',{name:'Manage Application',exact:true}).click();
+  const starts=new Date(Date.now()+14*86400000).toISOString(),ends=new Date(Date.parse(starts)+3600000).toISOString();
+  await staffPost('/booking/slots',{staff_id:1,starts_at:starts,ends_at:ends});
+  await staffPost('/tasks',{lead_id:created.id,title:'Existing consultant 2 meeting',assignee_id:2,due_date:starts.slice(0,10),scheduled_at:starts,category:'APPOINTMENT'});
+  const follow=await staffPost('/tasks',{lead_id:created.id,title:'Transfer follow up',assignee_id:1,due_date:starts.slice(0,10),category:'TASK'});
+  await portal.goto(base+'/#/portal/'+magic+'?section=appointments');
+  await portal.getByRole('button',{name:'Book Appointment',exact:true}).click();
+  const appointments=portal.locator('section.panel').filter({has:portal.getByRole('heading',{name:'Your Appointments',exact:true})});
+  await appointments.getByRole('button',{name:'Cancel Booking',exact:true}).waitFor();
+  await page.getByRole('dialog').getByRole('combobox',{name:'Consultant',exact:true}).selectOption('2');
+  await page.getByRole('dialog').getByLabel(/Transfer open tasks/).check();
+  saved=page.waitForResponse(r=>r.url().endsWith('/assignment')&&r.request().method()==='POST');await page.getByRole('dialog').getByRole('button',{name:'Save Assignment',exact:true}).click();assert.equal((await saved).ok(),true);
+  const booked=db.prepare("SELECT b.task_id,t.assignee_id,bs.staff_id FROM bookings b JOIN tasks t ON t.id=b.task_id JOIN booking_slots bs ON bs.id=b.slot_id WHERE b.lead_id=? AND b.status='BOOKED'").get(created.id);
+  assert.equal(booked.assignee_id,1);assert.equal(booked.staff_id,1);assert.equal(db.prepare('SELECT assignee_id FROM tasks WHERE id=?').get(follow.id).assignee_id,2);
+  await portal.reload();await appointments.getByRole('cell',{name:'Cristina Dela Cruz',exact:true}).waitFor();
+  await page.goto(base+'/#/tasks');
+  const complete=page.getByRole('checkbox',{name:'Complete Client appointment',exact:true});
+  saved=page.waitForResponse(r=>r.url().endsWith('/tasks/'+booked.task_id)&&r.request().method()==='PATCH');await complete.check();assert.equal((await saved).ok(),true);
+  await portal.reload();await appointments.getByText('Completed',{exact:true}).waitFor();assert.equal(await appointments.getByRole('button',{name:'Cancel Booking',exact:true}).count(),0);
+  saved=page.waitForResponse(r=>r.url().endsWith('/tasks/'+booked.task_id)&&r.request().method()==='PATCH');await complete.uncheck();assert.equal((await saved).ok(),true);
+  await portal.reload();await appointments.getByRole('button',{name:'Cancel Booking',exact:true}).click();await appointments.getByRole('button',{name:'Confirm: Cancel Booking',exact:true}).click();
+  await appointments.getByText('Cancelled',{exact:true}).waitFor();assert.equal(db.prepare('SELECT status FROM tasks WHERE id=?').get(booked.task_id).status,'DONE');
+  await page.goto(base+'/#/lead/'+created.id);await page.getByRole('button',{name:'Manage Application',exact:true}).click();const closing=page.getByRole('dialog',{name:'Manage application',exact:true});
+  await closing.getByRole('combobox',{name:'Outcome',exact:true}).selectOption('ARCHIVED');await closing.getByLabel('Reason',{exact:true}).fill('Archive completed browser fixture');
+  saved=page.waitForResponse(r=>r.url().endsWith('/pipeline')&&r.request().method()==='POST');await closing.getByRole('button',{name:'Close Application',exact:true}).click();assert.equal((await saved).ok(),true);await closing.getByRole('button',{name:'Close dialog',exact:true}).click();
+  await page.goto(base+'/#/dashboard');await page.getByRole('heading',{name:'Application Pipeline',exact:true}).waitFor();
+  const activeClients=page.locator('.metric').filter({has:page.locator('.metric-name',{hasText:'Active Clients'})});assert.equal(await activeClients.locator('strong').innerText(),'0');
+  const dashboard=await page.evaluate(async()=>{const r=await fetch('/v1/dashboard',{headers:{Authorization:'Bearer '+localStorage.tok}});return r.json()});assert.equal(dashboard.conversion.clients,1);
+  await activeClients.getByRole('link',{name:'View active clients',exact:true}).click();await page.getByRole('heading',{name:'Clients',level:1,exact:true}).waitFor();await page.getByText('No records to show.',{exact:true}).waitFor();
+  console.log('Basic editing, quick actions, decision/stage consistency, client counts, reassignment and booking checks passed.');
+  await anonymous.close();await context.close();
+ }finally{if(browser)await browser.close();if(server)await new Promise(r=>server.close(r));if(db)db.close();await fs.rm(temp,{recursive:true,force:true})}
+})().catch(e=>{console.error(e);process.exitCode=1});

@@ -1,0 +1,130 @@
+import type { Database, Audit, Auth, Services, HttpRequest, HttpResponse, HttpNext } from './types/runtime';
+import type { Router } from 'express';
+const crypto = require('node:crypto') as typeof import('node:crypto');
+const service = (db: Database, ops: Services, audit: Audit, record: any) => {
+    db.exec(`CREATE TABLE IF NOT EXISTS checkout_attempts(id TEXT PRIMARY KEY,charge_id INTEGER NOT NULL,lead_id INTEGER NOT NULL,amount_cents INTEGER NOT NULL,currency TEXT NOT NULL,state TEXT DEFAULT 'CREATING',session_id TEXT UNIQUE,url TEXT,form TEXT NOT NULL,error TEXT,expires_at INTEGER,created_at TEXT DEFAULT CURRENT_TIMESTAMP);
+ CREATE UNIQUE INDEX IF NOT EXISTS checkout_open ON checkout_attempts(charge_id) WHERE state IN ('CREATING','OPEN','UNKNOWN');
+ CREATE TABLE IF NOT EXISTS provider_payments(payment_id INTEGER PRIMARY KEY,provider_intent TEXT UNIQUE NOT NULL,session_id TEXT UNIQUE NOT NULL);
+ CREATE TABLE IF NOT EXISTS payment_webhooks(event_id TEXT PRIMARY KEY,type TEXT NOT NULL,outcome TEXT NOT NULL,created_at TEXT DEFAULT CURRENT_TIMESTAMP);
+ CREATE TABLE IF NOT EXISTS provider_refund_requests(id TEXT PRIMARY KEY,payment_id INTEGER NOT NULL,amount_cents INTEGER NOT NULL,reason TEXT NOT NULL,state TEXT DEFAULT 'PENDING',provider_id TEXT UNIQUE,error TEXT,created_at TEXT DEFAULT CURRENT_TIMESTAMP);`);
+    const configured = () => process.env.PAYMENT_PROVIDER === 'stripe' && /^sk_(test|live)_/.test(process.env.STRIPE_SECRET_KEY || '') && !!process.env.STRIPE_WEBHOOK_SECRET;
+    const fail = (s: any, e: any, status = 400) => s.status(status).json({ error: e });
+    const safe = (fn: any) => (q: HttpRequest, s: HttpResponse, next: HttpNext) => Promise.resolve().then(() => fn(q, s)).catch(e => { record('PAYMENT_PROVIDER_REQUEST_FAILED'); s.status(400).json({ error: e.message.startsWith('STRIPE_HTTP_') ? e.message : 'PAYMENT_REQUEST_FAILED' }); });
+    async function api(route: any, form: any, key: any) { const response = await fetch('https://api.stripe.com/v1/' + route, { method: 'POST', signal: AbortSignal.timeout(15000), headers: { Authorization: 'Bearer ' + process.env.STRIPE_SECRET_KEY, 'Content-Type': 'application/x-www-form-urlencoded', 'Idempotency-Key': 'ecc-' + key }, body: new URLSearchParams(form).toString() }); if (!response.ok)
+        throw Error('STRIPE_HTTP_' + response.status); return response.json(); }
+    function refundSucceeded(r: any) { if (r.status !== 'succeeded')
+        return false; const mapped = db.prepare('SELECT p.*,c.lead_id,c.currency FROM provider_payments m JOIN payments p ON p.id=m.payment_id JOIN charges c ON c.id=p.charge_id WHERE m.provider_intent=?').get(r.payment_intent); if (!mapped || !Number.isSafeInteger(r.amount) || r.amount <= 0 || r.currency?.toUpperCase() !== mapped.currency)
+        return false; const job = db.prepare('SELECT * FROM provider_refund_requests WHERE provider_id=?').get(r.id) || db.prepare('SELECT * FROM provider_refund_requests WHERE id=?').get(r.metadata?.ecc_refund_id || ''); if (job && (job.payment_id !== mapped.id || job.amount_cents !== r.amount || (job.provider_id && job.provider_id !== r.id)))
+        return false; const reconcile = () => { if (job)
+        db.prepare("UPDATE provider_refund_requests SET state='SUCCEEDED',provider_id=? WHERE id=?").run(r.id, job.id); }; const reference = 'STRIPE:' + r.id; if (db.prepare('SELECT id FROM refunds WHERE reference=? AND payment_id=? AND amount_cents=?').get(reference, mapped.id, r.amount)) {
+        reconcile();
+        return true;
+    } const used = db.prepare('SELECT COALESCE(SUM(amount_cents),0) n FROM refunds WHERE payment_id=?').get(mapped.id).n; if (used + r.amount > mapped.amount_cents)
+        return false; const id = db.prepare('INSERT INTO refunds(payment_id,amount_cents,reference,reason,refunded_on,created_by) VALUES(?,?,?,?,?,NULL)').run(mapped.id, r.amount, reference, job?.reason || 'Online payment refund', new Date().toISOString().slice(0, 10)).lastInsertRowid; reconcile(); audit('lead', mapped.lead_id, 'REFUND_RECORDED', 'payment provider', null, { id, reference, reason: job?.reason || 'Online payment refund', amount_cents: r.amount, currency: mapped.currency }); return true; }
+    function processEvent(event: any) {
+        const object = event.data?.object;
+        if (!event.id || typeof event.id !== 'string' || event.id.length > 200 || !object)
+            throw Error('INVALID_PAYMENT_EVENT');
+        if (db.prepare('SELECT event_id FROM payment_webhooks WHERE event_id=?').get(event.id))
+            return { received: true, duplicate: true };
+        return db.transaction(() => {
+            let outcome = 'IGNORED';
+            if (['checkout.session.completed', 'checkout.session.async_payment_succeeded'].includes(event.type) && object.payment_status === 'paid') {
+                const attempt = db.prepare('SELECT * FROM checkout_attempts WHERE session_id=?').get(object.id) || db.prepare('SELECT * FROM checkout_attempts WHERE id=? AND (session_id IS NULL OR session_id=?)').get(object.metadata?.ecc_attempt_id || '', object.id);
+                if (!attempt)
+                    throw Error('PAYMENT_ATTEMPT_NOT_LINKED');
+                if (attempt) {
+                    db.prepare('UPDATE checkout_attempts SET session_id=? WHERE id=?').run(object.id, attempt.id);
+                    const invoice = ops.finances(attempt.lead_id).find((c: any) => c.id === attempt.charge_id), valid = invoice && invoice.status !== 'VOID' && Number.isSafeInteger(object.amount_total) && object.amount_total === attempt.amount_cents && object.currency?.toUpperCase() === attempt.currency && /^pi_[A-Za-z0-9_]+$/.test(object.payment_intent || '');
+                    const already = db.prepare('SELECT payment_id FROM provider_payments WHERE session_id=? OR provider_intent=?').get(object.id, object.payment_intent || '');
+                    if (already)
+                        outcome = 'DUPLICATE_PAYMENT';
+                    else if (valid && object.amount_total <= invoice.balance_cents) {
+                        const reference = 'STRIPE:' + object.payment_intent, id = db.prepare('INSERT INTO payments(charge_id,amount_cents,reference,paid_at) VALUES(?,?,?,?)').run(invoice.id, object.amount_total, reference, new Date().toISOString().slice(0, 10)).lastInsertRowid, receipt = 'ECC-RCP-' + new Date().getFullYear() + '-' + String(id).padStart(5, '0');
+                        db.prepare('UPDATE payments SET receipt_no=? WHERE id=?').run(receipt, id);
+                        db.prepare('INSERT INTO provider_payments(payment_id,provider_intent,session_id) VALUES(?,?,?)').run(id, object.payment_intent, object.id);
+                        db.prepare("UPDATE checkout_attempts SET state='PAID' WHERE id=?").run(attempt.id);
+                        audit('lead', attempt.lead_id, 'PAYMENT_RECORDED', 'payment provider', null, { payment_id: id, receipt_no: receipt, amount_cents: object.amount_total, currency: attempt.currency, reference });
+                        outcome = 'APPLIED';
+                    }
+                    else {
+                        db.prepare("UPDATE checkout_attempts SET state='REVIEW_REQUIRED',error='PAYMENT_AMOUNT_CURRENCY_OR_BALANCE_MISMATCH' WHERE id=?").run(attempt.id);
+                        record('PAYMENT_REQUIRES_RECONCILIATION');
+                        outcome = 'REVIEW_REQUIRED';
+                    }
+                }
+            }
+            if (event.type === 'checkout.session.expired')
+                db.prepare("UPDATE checkout_attempts SET state='EXPIRED' WHERE session_id=? AND state IN ('OPEN','UNKNOWN','CREATING')").run(object.id);
+            if (['refund.updated', 'refund.created'].includes(event.type)) {
+                if (object.status === 'succeeded')
+                    outcome = refundSucceeded(object) ? 'REFUND_APPLIED' : 'REFUND_REVIEW_REQUIRED';
+                else if (['failed', 'canceled'].includes(object.status)) {
+                    db.prepare("UPDATE provider_refund_requests SET state='FAILED',error=? WHERE provider_id=?").run('PROVIDER_REFUND_' + object.status.toUpperCase(), object.id);
+                    outcome = 'REFUND_FAILED';
+                }
+            }
+            db.prepare('INSERT INTO payment_webhooks(event_id,type,outcome) VALUES(?,?,?)').run(event.id, event.type, outcome);
+            return { received: true, outcome };
+        })();
+    }
+    function webhook(q: HttpRequest, s: HttpResponse) { if (!configured())
+        return fail(s, 'PAYMENTS_NOT_CONFIGURED', 503); try {
+        if (!Buffer.isBuffer(q.body))
+            throw Error('RAW_BODY_REQUIRED');
+        const fields = String(q.headers['stripe-signature'] || '').split(',').map(x => x.split('=')), timestamp = fields.find(x => x[0] === 't')?.[1], signatures = fields.filter(x => x[0] === 'v1').map(x => x[1]);
+        if (!/^\d+$/.test(timestamp || '') || Math.abs(Date.now() / 1000 - Number(timestamp)) > 300)
+            throw Error('EXPIRED_SIGNATURE');
+        const expected = crypto.createHmac('sha256', process.env.STRIPE_WEBHOOK_SECRET!).update(timestamp + '.').update(q.body).digest();
+        if (!signatures.some(sig => /^[a-f0-9]{64}$/i.test(sig || '') && crypto.timingSafeEqual(Buffer.from(sig, 'hex'), expected)))
+            throw Error('INVALID_SIGNATURE');
+        const event = JSON.parse(q.body.toString());
+        if (event.livemode !== process.env.STRIPE_SECRET_KEY!.startsWith('sk_live_'))
+            throw Error('PAYMENT_MODE_MISMATCH');
+        s.json(processEvent(event));
+    }
+    catch (e: any) {
+        fail(s, 'INVALID_PAYMENT_WEBHOOK', 400);
+    } }
+    function register(v1: Router, auth: Auth) {
+        v1.get('/portal/payment-options', ops.portal, (q: HttpRequest, s: HttpResponse) => s.json({ provider: 'stripe', configured: configured(), mode: process.env.STRIPE_SECRET_KEY?.startsWith('sk_live_') ? 'live' : 'test' }));
+        v1.post('/portal/invoices/:invoice/checkout', ops.portal, safe(async (q: HttpRequest, s: HttpResponse) => { if (!configured())
+            return fail(s, 'PAYMENTS_NOT_CONFIGURED', 503); const invoice = ops.finances(q.client.id).find((c: any) => c.id === Number(q.params.invoice)); if (!invoice || invoice.status === 'VOID' || invoice.balance_cents <= 0)
+            return fail(s, 'OUTSTANDING_INVOICE_REQUIRED'); if (!['AED', 'USD', 'EUR', 'GBP', 'CAD', 'AUD', 'NZD'].includes(invoice.currency))
+            return fail(s, 'ONLINE_CURRENCY_NOT_SUPPORTED'); const installment = q.body.installment_id ? invoice.installments.find((i: any) => i.id === Number(q.body.installment_id)) : null; if (q.body.installment_id && (!installment || installment.balance_cents <= 0))
+            return fail(s, 'OUTSTANDING_INSTALLMENT_REQUIRED'); const amount = installment ? Math.min(installment.balance_cents, invoice.balance_cents) : invoice.balance_cents; let attempt = db.transaction(() => { db.prepare("UPDATE checkout_attempts SET state='EXPIRED' WHERE charge_id=? AND expires_at<? AND state IN ('CREATING','OPEN','UNKNOWN')").run(invoice.id, Date.now()); const old = db.prepare("SELECT * FROM checkout_attempts WHERE charge_id=? AND state IN ('CREATING','OPEN','UNKNOWN')").get(invoice.id); if (old) {
+            if (old.amount_cents !== amount)
+                throw Error('ANOTHER_PAYMENT_ATTEMPT_IS_OPEN');
+            return old;
+        } const id = crypto.randomUUID(), root = String(process.env.PUBLIC_BASE_URL || 'http://localhost:' + (process.env.PORT || 3000)).replace(/\/$/, ''), form = { mode: 'payment', 'payment_method_types[0]': 'card', success_url: root + '/#/payment-return?result=success', cancel_url: root + '/#/payment-return?result=cancelled', client_reference_id: String(invoice.id), customer_email: q.client.email, 'line_items[0][quantity]': '1', 'line_items[0][price_data][currency]': invoice.currency.toLowerCase(), 'line_items[0][price_data][unit_amount]': String(amount), 'line_items[0][price_data][product_data][name]': invoice.invoice_no, 'metadata[ecc_invoice_id]': String(invoice.id), 'metadata[ecc_attempt_id]': id, expires_at: String(Math.floor(Date.now() / 1000) + 1860) }; db.prepare('INSERT INTO checkout_attempts(id,charge_id,lead_id,amount_cents,currency,form,expires_at) VALUES(?,?,?,?,?,?,?)').run(id, invoice.id, q.client.id, amount, invoice.currency, JSON.stringify(form), Date.now() + 1860000); return db.prepare('SELECT * FROM checkout_attempts WHERE id=?').get(id); })(); if (attempt.state === 'OPEN' && attempt.url)
+            return s.json({ url: attempt.url }); try {
+            const session = await api('checkout/sessions', JSON.parse(attempt.form), 'checkout-' + attempt.id);
+            if (!/^cs_/.test(session.id || '') || !/^https:\/\/checkout\.stripe\.com\//.test(session.url || ''))
+                throw Error('INVALID_CHECKOUT_RESPONSE');
+            db.prepare("UPDATE checkout_attempts SET state=CASE WHEN state IN ('CREATING','UNKNOWN') THEN 'OPEN' ELSE state END,session_id=?,url=?,error=NULL WHERE id=? AND (session_id IS NULL OR session_id=?)").run(session.id, session.url, attempt.id, session.id);
+            s.json({ url: session.url });
+        }
+        catch (e: any) {
+            db.prepare("UPDATE checkout_attempts SET state='UNKNOWN',error='CHECKOUT_CREATION_NOT_CONFIRMED' WHERE id=? AND state='CREATING'").run(attempt.id);
+            throw e;
+        } }));
+        v1.post('/workflow/:id/payments/:payment/provider-refund', auth('approver', 'admin'), safe(async (q: HttpRequest, s: HttpResponse) => { if (!configured())
+            return fail(s, 'PAYMENTS_NOT_CONFIGURED', 503); const { cents } = (require('./operations') as typeof import('./operations')).validation, b = q.body, p = db.prepare('SELECT p.*,m.provider_intent,c.lead_id FROM payments p JOIN provider_payments m ON m.payment_id=p.id JOIN charges c ON c.id=p.charge_id WHERE p.id=? AND c.lead_id=?').get(q.params.payment, q.params.id); if (!p || typeof b.reason !== 'string' || !b.reason.trim() || typeof b.request_id !== 'string' || !/^[a-zA-Z0-9-]{16,80}$/.test(b.request_id))
+            return fail(s, 'ONLINE_PAYMENT_REASON_AND_REQUEST_ID_REQUIRED'); const amount = cents(b.amount); let job = db.transaction(() => { const old = db.prepare('SELECT * FROM provider_refund_requests WHERE id=?').get(b.request_id); if (old) {
+            if (old.payment_id !== p.id || old.amount_cents !== amount)
+                throw Error('REFUND_IDEMPOTENCY_MISMATCH');
+            return old;
+        } const refunded = db.prepare('SELECT COALESCE(SUM(amount_cents),0) n FROM refunds WHERE payment_id=?').get(p.id).n, pending = db.prepare("SELECT COALESCE(SUM(amount_cents),0) n FROM provider_refund_requests WHERE payment_id=? AND state='PENDING'").get(p.id).n; if (amount + pending + refunded > p.amount_cents)
+            throw Error('REFUND_EXCEEDS_REMAINING_PAYMENT'); db.prepare('INSERT INTO provider_refund_requests(id,payment_id,amount_cents,reason) VALUES(?,?,?,?)').run(b.request_id, p.id, amount, b.reason.trim()); return db.prepare('SELECT * FROM provider_refund_requests WHERE id=?').get(b.request_id); })(); if (job.state === 'SUCCEEDED')
+            return s.json({ status: 'SUCCEEDED' }); if (job.state === 'FAILED')
+            return fail(s, 'REFUND_PREVIOUSLY_FAILED'); const refund = await api('refunds', { payment_intent: p.provider_intent, amount: String(amount), 'metadata[ecc_refund_id]': job.id }, 'refund-' + job.id); if (!/^re_/.test(refund.id || ''))
+            throw Error('INVALID_REFUND_RESPONSE'); db.transaction(() => { db.prepare('UPDATE provider_refund_requests SET provider_id=? WHERE id=?').run(refund.id, job.id); if (refund.status === 'succeeded' && !refundSucceeded(refund))
+            throw Error('REFUND_RECONCILIATION_REQUIRED'); if (['failed', 'canceled'].includes(refund.status))
+            db.prepare("UPDATE provider_refund_requests SET state='FAILED',error='PROVIDER_REFUND_FAILED' WHERE id=?").run(job.id); })(); s.json({ status: refund.status }); }));
+        v1.get('/admin/payment-status', auth('admin'), (q: HttpRequest, s: HttpResponse) => s.json({ configured: configured(), attempts: db.prepare('SELECT id,charge_id,lead_id,amount_cents,currency,state,error,created_at FROM checkout_attempts ORDER BY created_at DESC LIMIT 100').all(), refunds: db.prepare('SELECT * FROM provider_refund_requests ORDER BY created_at DESC LIMIT 100').all() }));
+    }
+    const finances = ops.finances;
+    ops.finances = (id: any) => finances(id).map((c: any) => ({ ...c, payments: c.payments.map((p: any) => ({ ...p, provider: db.prepare('SELECT provider_intent,session_id FROM provider_payments WHERE payment_id=?').get(p.id) || null })) }));
+    return { register, webhook, configured, processEvent };
+};
+export = service;

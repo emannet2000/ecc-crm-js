@@ -1,0 +1,20 @@
+const {test}=require('node:test'),assert=require('node:assert/strict'),harness=require('./support/http.cjs');
+test('personal fields persist for leads and clients with validated ages and legacy names',async t=>{
+ const {req,login,db}=harness(t),token=await login('admin@ecc.example');
+ const base={email:'person@example.test',country_of_interest:'Spain',application_type:'TOURIST'};
+ const body={...base,first_name:' Ana ',middle_name:'Maria',last_name:'Cruz',age:'28',nationality:'Filipino',address:' 123 Main Street ',gender:'Female'};
+ const {id}=await req('/leads',{method:'POST',token,body,status:201});
+ let row=await req('/workflow/'+id,{token});assert.equal(row.full_name,'Ana Maria Cruz');assert.equal(row.first_name,'Ana');assert.equal(row.age,28);assert.equal(row.nationality,'Filipino');assert.equal(row.address,'123 Main Street');assert.equal(row.gender,'Female');
+ db.prepare("UPDATE leads SET status='CLIENT' WHERE id=?").run(id);
+ await req('/leads/'+id,{method:'PATCH',token,body:{first_name:'Anna',middle_name:'',age:0,nationality:'Canadian',address:'456 New Street',gender:'Prefer not to say'}});
+ row=await req('/workflow/'+id,{token});assert.equal(row.full_name,'Anna Cruz');assert.equal(row.age,0);assert.equal(row.nationality,'Canadian');assert.equal(row.address,'456 New Street');assert.equal(row.gender,'Prefer not to say');
+ for(const body of [{address:42},{address:'x'.repeat(501)},{gender:[]},{gender:'x'.repeat(101)}])await req('/leads/'+id,{method:'PATCH',token,body,status:400});
+ for(const age of [-1,121,1.5,'abc',true,[],{}])await req('/leads/'+id,{method:'PATCH',token,body:{age},status:400});
+ assert.equal((await req('/workflow/'+id,{token})).age,0);
+ await req('/leads/'+id,{method:'PATCH',token,body:{age:''}});assert.equal((await req('/workflow/'+id,{token})).age,null);
+ const legacy=await req('/leads',{method:'POST',token,body:{...base,full_name:'Existing Single Name'},status:201});
+ await req('/leads/'+legacy.id,{method:'PATCH',token,body:{first_name:'',middle_name:'',last_name:'',full_name:'Preserved Name'}});
+ assert.equal((await req('/workflow/'+legacy.id,{token})).full_name,'Preserved Name');
+ await req('/public/inquiries',{method:'POST',body:{...body,email:'public-person@example.test'},status:201});
+ assert.equal(db.prepare('SELECT age FROM leads WHERE email=?').get('public-person@example.test').age,28);
+});

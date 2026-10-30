@@ -2,7 +2,7 @@ const fs=require('node:fs/promises'),os=require('node:os'),path=require('node:pa
 const {chromium}=require('@playwright/test');
 (async()=>{const temp=await fs.mkdtemp(path.join(os.tmpdir(),'ecc-native-'));let server,browser,db,lastPage;try{
  process.env.NODE_ENV='test';process.env.DB=path.join(temp,'native.db');process.env.JWT_SECRET='isolated-native-browser-test-private-key';process.env.EMAIL_PROVIDER='';process.env.PAYMENT_PROVIDER='';
- const crm=require('../server');db=crm.db;server=await new Promise((resolve,reject)=>{const s=crm.app.listen(0,'127.0.0.1',()=>resolve(s));s.once('error',reject)});const base='http://127.0.0.1:'+server.address().port;
+ const crm=require('../dist/server');db=crm.db;server=await new Promise((resolve,reject)=>{const s=crm.app.listen(0,'127.0.0.1',()=>resolve(s));s.once('error',reject)});const base='http://127.0.0.1:'+server.address().port;
  const out=path.resolve('test-results/native');await fs.mkdir(out,{recursive:true});const errors=[];
  async function api(route,body,token,method=body?'POST':'GET'){const r=await fetch(base+'/v1'+route,{method,headers:{'Content-Type':'application/json',...(token?{Authorization:'Bearer '+token}:{})},body:body?JSON.stringify(body):undefined});const d=await r.json();assert.equal(r.ok,true,route+': '+JSON.stringify(d));return d}
  const admin=(await api('/auth/login',{email:'admin@ecc.example',password:'Test1234!'})).token;

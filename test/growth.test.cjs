@@ -29,5 +29,5 @@ test('import, reviewed merges and idempotent automation enforce admin boundaries
  const xlsx=Buffer.from(await workbook.xlsx.writeBuffer()).toString('base64'),converted=await post('/admin/imports/xlsx',{data:xlsx});assert.match(converted.csv,/Excel applicant/);assert.equal(converted.headers[0],'Name');
  sheet.getCell('A2').value={formula:'1+1',result:2};await post('/admin/imports/xlsx',{data:Buffer.from(await workbook.xlsx.writeBuffer()).toString('base64')},admin,400);
  await post('/admin/imports/xlsx',{data:'bm90IGV4Y2Vs'},admin,400);
- const {parseCSV}=require('../growth-tools');assert.throws(()=>parseCSV('a,b\n"oops,x'),/UNCLOSED/);assert.throws(()=>parseCSV('a,a\nx,y'),/UNIQUE/);assert.deepEqual(parseCSV('a,b\n"line\nbreak","a""b"').rows,[['line\nbreak','a"b']]);
+ const {parseCSV}=require('../dist/growth-tools');assert.throws(()=>parseCSV('a,b\n"oops,x'),/UNCLOSED/);assert.throws(()=>parseCSV('a,a\nx,y'),/UNIQUE/);assert.deepEqual(parseCSV('a,b\n"line\nbreak","a""b"').rows,[['line\nbreak','a"b']]);
 });

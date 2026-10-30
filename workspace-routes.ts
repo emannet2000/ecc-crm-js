@@ -1,0 +1,163 @@
+import {personDetails,personName} from './shared/person-details';
+import {caseState} from './shared/workflow-model';
+import type { Database, Audit, Auth, Services, HttpRequest, HttpResponse, HttpNext } from './types/runtime';
+import type { Router } from 'express';
+const crypto = require('node:crypto') as typeof import('node:crypto');
+const service = (v1: Router, auth: Auth, c: any) => {
+    const { text, date, cents, today } = (require('./operations') as typeof import('./operations')).validation;
+    const { db, lead, log, portal, fail, guard, finance, queue, notify, staffNotify, hash, invite, checklist, finances, schedule, pricing } = c;
+    const dateTime = (v: any) => v === null || v === '' || v === undefined ? null : typeof v === 'string' && !isNaN(Date.parse(v)) ? new Date(v).toISOString() : false;
+    const requireLead = (id: any, client = false) => { const l = lead(id); if (!l)
+        throw Error('NOT_FOUND'); if (client && l.status !== 'CLIENT')
+        throw Error('CLIENT_REQUIRED'); return l; };
+    v1.get('/lookups/leads', auth(), (q: HttpRequest, s: HttpResponse) => { const search = String(q.query.search || '').slice(0, 200); s.json(db.prepare('SELECT id,reference_no,full_name,status FROM leads WHERE (full_name LIKE ? OR reference_no LIKE ?) AND (? IS NULL OR assigned_to=? OR EXISTS(SELECT 1 FROM tasks WHERE lead_id=leads.id AND assignee_id=?)) ORDER BY id DESC LIMIT 200').all('%' + search + '%', '%' + search + '%', q.scope_user, q.scope_user, q.scope_user)); });
+    v1.post('/leads', auth(), guard((q: HttpRequest, s: HttpResponse) => { const b = q.body, personal=personDetails(b);b.full_name=personName(b);const assigned = q.scope_user || Number(b.assigned_to) || q.user.id; if (!text(b.full_name, 200) || !/^\S+@\S+\.\S+$/.test(b.email || '') || !Object.values<any>(pricing().data).some((c: any) => c.label === b.country_of_interest) || !['TOURIST', 'STUDY', 'WORK', 'RESIDENCY'].includes(b.application_type))
+        return fail(s, 'VALID_LEAD_DETAILS_REQUIRED'); if (!db.prepare("SELECT id FROM users WHERE id=? AND is_active=1 AND role<>'client'").get(assigned))
+        return fail(s, 'ACTIVE_AGENT_REQUIRED'); const result = db.transaction(() => { const n = db.prepare('SELECT COALESCE(MAX(id),0)+1 n FROM leads').get().n, ref = 'LEAD-' + new Date().getFullYear() + '-' + String(n).padStart(4, '0'); const r = db.prepare('INSERT INTO leads(reference_no,full_name,email,phone,country_of_interest,application_type,origin_country,assigned_to) VALUES(?,?,?,?,?,?,?,?)').run(ref, b.full_name.trim(), b.email.trim().toLowerCase(), String(b.phone || ''), b.country_of_interest, b.application_type, String(b.origin_country || 'UAE'), assigned); const keys=Object.keys(personal);if(keys.length)db.prepare(`UPDATE leads SET ${keys.map(k=>k+'=?').join(',')} WHERE id=?`).run(...keys.map(k=>personal[k]),r.lastInsertRowid); log(q, r.lastInsertRowid, 'CREATE', { reference_no: ref }); return { id: r.lastInsertRowid, reference_no: ref }; })(); s.status(201).json(result); }));
+    v1.get('/tasks', auth(), guard((q: HttpRequest, s: HttpResponse) => { const w: any[] = [], p = [], b = q.query; if (q.scope_user) {
+        w.push('(t.assignee_id=? OR l.assigned_to=?)');
+        p.push(q.scope_user, q.scope_user);
+    } for (const [key, column] of [['from', 'due_date>='], ['to', 'due_date<=']])
+        if (b[key]) {
+            if (!date(b[key]))
+                return fail(s, 'INVALID_DATE');
+            w.push("(CASE WHEN t.category IN ('INTERVIEW','APPOINTMENT') AND t.scheduled_at IS NOT NULL THEN substr(t.scheduled_at,1,10) ELSE t.due_date END)" + column.replace('due_date', '') + '?');
+            p.push(b[key]);
+        } if (b.assignee_id) {
+        w.push('t.assignee_id=?');
+        p.push(Number(b.assignee_id));
+    } if (b.status) {
+        if (!['PENDING', 'IN_PROGRESS', 'DONE'].includes(b.status))
+            return fail(s, 'INVALID_STATUS');
+        w.push('t.status=?');
+        p.push(b.status);
+    } if (b.overdue === '1') {
+        w.push("t.status<>'DONE' AND t.due_date<?");
+        p.push(today());
+    } s.json(db.prepare(`SELECT t.*,u.full_name assignee,l.full_name lead_name,l.reference_no FROM tasks t LEFT JOIN users u ON u.id=t.assignee_id LEFT JOIN leads l ON l.id=t.lead_id ${w.length ? 'WHERE ' + w.join(' AND ') : ''} ORDER BY COALESCE(t.scheduled_at,t.due_date),t.id LIMIT 2000`).all(...p)); }));
+    v1.get('/tasks/:task', auth(), (q: HttpRequest, s: HttpResponse) => { const task = db.prepare('SELECT * FROM tasks WHERE id=?').get(q.params.task); if (!task)
+        return fail(s, 'NOT_FOUND', 404); s.json(task); });
+    v1.post('/tasks', auth(), guard((q: HttpRequest, s: HttpResponse) => { const b = q.body, l = requireLead(b.lead_id), when = dateTime(b.scheduled_at), assignee = Number(b.assignee_id) || q.user.id; if (!text(b.title, 500) || !date(b.due_date) || !['PENDING', 'IN_PROGRESS', 'DONE'].includes(b.status || 'PENDING') || when === false || !['TASK', 'INTERVIEW', 'FOLLOW_UP', 'APPOINTMENT'].includes(b.category) || !db.prepare("SELECT id FROM users WHERE id=? AND is_active=1 AND role IN ('staff','agent','approver','admin')").get(assignee) || (['INTERVIEW', 'APPOINTMENT'].includes(b.category) && !when))
+        return fail(s, 'TITLE_DATE_ASSIGNEE_AND_SCHEDULE_REQUIRED'); const r = db.transaction(() => { const r = db.prepare('INSERT INTO tasks(lead_id,title,assignee_id,due_date,category,scheduled_at,status) VALUES(?,?,?,?,?,?,?)').run(l.id, b.title.trim(), assignee, b.due_date, b.category, when, b.status || 'PENDING'); auditTask(r.lastInsertRowid, 'CREATE', q, b); return r; })(); s.status(201).json({ id: r.lastInsertRowid }); }));
+    const auditTask = (id: any, action: any, q: any, body: any) => { c.db.prepare('INSERT INTO audit_log(entity_type,entity_id,action,changed_by,new_values) VALUES(?,?,?,?,?)').run('task', id, action, q.user.name, JSON.stringify(body)); const t = db.prepare('SELECT t.*,u.email FROM tasks t JOIN users u ON u.id=t.assignee_id WHERE t.id=?').get(id); queue(t.lead_id, t.email, 'ECC task ' + action.toLowerCase(), `${t.title}\nDue: ${t.due_date}\nScheduled: ${t.scheduled_at || 'not set'}`); if (['INTERVIEW', 'APPOINTMENT'].includes(t.category) && t.scheduled_at)
+        notify(t.lead_id, 'ECC appointment scheduled', `${t.title}\n${t.scheduled_at}`); };
+    (require('./client-accounts') as typeof import('./client-accounts'))(v1, c);
+    v1.post('/workflow/:id/assignment', finance, guard((q: HttpRequest, s: HttpResponse) => { const l = requireLead(q.params.id), id = Number(q.body.assigned_to), u = db.prepare("SELECT * FROM users WHERE id=? AND is_active=1 AND role IN ('staff','agent','approver','admin')").get(id); if (!u)
+        return fail(s, 'ACTIVE_ASSIGNEE_REQUIRED'); const transfer = db.transaction(() => { const result = q.body.transfer_tasks === true ? (require('./appointment-scheduling') as typeof import('./appointment-scheduling')).transferOpenTasks(db, l.id, l.assigned_to, id) : { transferred: 0, bookings_preserved: 0 }; db.prepare('UPDATE leads SET assigned_to=? WHERE id=?').run(id, l.id); log(q, l.id, 'REASSIGNED', { from: l.assigned_to, to: id, ...result }); staffNotify(l.id, 'ECC lead assigned', l.full_name); return result; })(); s.json({ ok: true, ...transfer }); }));
+    v1.get('/workflow/:id/duplicates', auth(), guard((q: HttpRequest, s: HttpResponse) => { const l = requireLead(q.params.id); s.json(db.prepare("SELECT id,reference_no,full_name,email,phone,status FROM leads WHERE id<>? AND (lower(email)=lower(?) OR (phone_normalized<>'' AND phone_normalized=?)) AND (? IS NULL OR assigned_to=? OR EXISTS(SELECT 1 FROM tasks WHERE lead_id=leads.id AND assignee_id=?)) ORDER BY id DESC").all(l.id, l.email, String(l.phone || '').replace(/\D/g, ''), q.scope_user, q.scope_user, q.scope_user)); }));
+    v1.post('/workflow/:id/pipeline', auth(), guard((q: HttpRequest, s: HttpResponse) => { const l = requireLead(q.params.id), b = q.body, closed = ['LOST', 'DISQUALIFIED', 'WITHDRAWN', 'ARCHIVED']; if (b.status === 'REOPEN') {
+        if (!closed.includes(l.status) || !l.previous_status)
+            return fail(s, 'CLOSED_LEAD_REQUIRED');
+        db.transaction(() => { db.prepare('UPDATE leads SET status=previous_status,previous_status=NULL,closed_reason=NULL WHERE id=?').run(l.id); log(q, l.id, 'REOPENED', { status: l.previous_status }); })();
+        return s.json({ ok: true });
+    } if (!closed.includes(b.status) || closed.includes(l.status) || !text(b.reason, 2000) || (l.status === 'CLIENT' && b.status !== 'ARCHIVED'))
+        return fail(s, 'VALID_OUTCOME_AND_REASON_REQUIRED'); db.transaction(() => { db.prepare('UPDATE leads SET previous_status=status,status=?,closed_reason=? WHERE id=?').run(b.status, b.reason.trim(), l.id); log(q, l.id, 'PIPELINE_CLOSED', { status: b.status, reason: b.reason }); })(); s.json({ ok: true }); }));
+    v1.patch('/workflow/:id/documents/:doc/metadata', auth(), guard((q: HttpRequest, s: HttpResponse) => { const d = db.prepare('SELECT * FROM documents WHERE id=? AND lead_id=?').get(q.params.doc, q.params.id); if (!d)
+        return fail(s, 'NOT_FOUND', 404); const rid = q.body.requirement_id ? Number(q.body.requirement_id) : null, expiry = q.body.expires_on || null; if (expiry && !date(expiry))
+        return fail(s, 'INVALID_EXPIRY_DATE'); if (rid && !db.prepare('SELECT id FROM requirements WHERE id=? AND lead_id=? AND kind=? AND active=1').get(rid, d.lead_id, d.kind))
+        return fail(s, 'MATCHING_REQUIREMENT_REQUIRED'); db.transaction(() => { db.prepare('UPDATE documents SET requirement_id=?,expires_on=? WHERE id=?').run(rid, expiry, d.id); if (d.kind === 'INITIAL')
+        db.prepare('UPDATE leads SET documents_approved=0 WHERE id=?').run(d.lead_id); log(q, d.lead_id, 'DOCUMENT_LINK_UPDATED', { document_id: d.id, requirement_id: rid, expires_on: expiry }); })(); s.json({ ok: true }); }));
+    v1.post('/workflow/:id/application-requirements', auth(), guard((q: HttpRequest, s: HttpResponse) => { const l = requireLead(q.params.id, true), b = q.body; if (!text(b.title, 500) || !date(b.due_date))
+        return fail(s, 'REQUIREMENT_AND_DEADLINE_REQUIRED'); const r = db.transaction(() => { const r = db.prepare("INSERT INTO requirements(lead_id,title,kind,due_date) VALUES(?,?,'APPLICATION',?)").run(l.id, b.title.trim(), b.due_date); notify(l.id, 'ECC additional document requested', `${b.title}\nDue: ${b.due_date}`); log(q, l.id, 'APPLICATION_DOCUMENT_REQUESTED', { id: r.lastInsertRowid, title: b.title, due_date: b.due_date }); return r; })(); s.status(201).json({ id: r.lastInsertRowid }); }));
+    v1.patch('/workflow/:id/case', auth(), guard((q: HttpRequest, s: HttpResponse) => { const l = requireLead(q.params.id, true), b = q.body; if (!['PENDING', 'APPROVED', 'REFUSED', 'WITHDRAWN'].includes(b.decision) || b.submitted_on && !date(b.submitted_on) || b.decision_on && !date(b.decision_on) || typeof b.submission_reference !== 'string' || b.submission_reference.length > 200 || typeof b.authority !== 'string' || b.authority.length > 200 || typeof b.notes !== 'string' || b.notes.length > 10000 || b.decision !== 'PENDING' && !date(b.decision_on))
+        return fail(s, 'VALID_CASE_DETAILS_AND_DECISION_DATE_REQUIRED'); db.transaction(() => { const previousDecision=db.prepare('SELECT decision FROM case_records WHERE lead_id=?').get(l.id)?.decision;db.prepare('INSERT INTO case_records(lead_id,submission_reference,authority,submitted_on,decision,decision_on,notes) VALUES(?,?,?,?,?,?,?) ON CONFLICT(lead_id) DO UPDATE SET submission_reference=excluded.submission_reference,authority=excluded.authority,submitted_on=excluded.submitted_on,decision=excluded.decision,decision_on=excluded.decision_on,notes=excluded.notes').run(l.id, b.submission_reference.trim(), b.authority.trim(), b.submitted_on || null, b.decision, b.decision_on || null, b.notes); const stage = caseState(b.decision,l.application_stage,b.submitted_on||null,previousDecision).application_stage; db.prepare('UPDATE leads SET application_stage=? WHERE id=?').run(stage, l.id); log(q, l.id, 'CASE_UPDATED', { reference: b.submission_reference, decision: b.decision, application_stage: stage }); notify(l.id, 'ECC case update', `Submission reference: ${b.submission_reference || 'not yet submitted'}\nDecision: ${b.decision}`); })(); s.json({ ok: true }); }));
+    function saveEvent(q: HttpRequest, s: HttpResponse, existing: any) { const l = requireLead(q.params.id, true), b = q.body, when = dateTime(b.occurs_at); if (!['APPOINTMENT', 'REQUEST', 'DEADLINE', 'DECISION', 'NOTE'].includes(b.type) || !text(b.title, 500) || when === false || b.due_date && !date(b.due_date) || !['OPEN', 'DONE'].includes(b.status || 'OPEN') || typeof b.details !== 'string' || b.details.length > 10000 || (['REQUEST', 'DEADLINE'].includes(b.type) && !date(b.due_date)) || (b.type === 'APPOINTMENT' && !when))
+        return fail(s, 'VALID_EVENT_TITLE_TYPE_AND_DATES_REQUIRED'); db.transaction(() => { let id = existing?.id; if (id)
+        db.prepare('UPDATE case_events SET type=?,title=?,occurs_at=?,due_date=?,status=?,details=?,client_visible=? WHERE id=?').run(b.type, b.title.trim(), when, b.due_date || null, b.status || 'OPEN', b.details, b.client_visible === false ? 0 : 1, id);
+    else
+        id = db.prepare('INSERT INTO case_events(lead_id,type,title,occurs_at,due_date,status,details,client_visible) VALUES(?,?,?,?,?,?,?,?)').run(l.id, b.type, b.title.trim(), when, b.due_date || null, b.status || 'OPEN', b.details, b.client_visible === false ? 0 : 1).lastInsertRowid; const t = db.prepare('SELECT id FROM tasks WHERE case_event_id=?').get(id), due = b.due_date || (when ? when.slice(0, 10) : null); if (due) {
+        if (t)
+            db.prepare('UPDATE tasks SET title=?,due_date=?,scheduled_at=?,status=?,category=? WHERE id=?').run(b.title.trim(), due, when, b.status === 'DONE' ? 'DONE' : 'PENDING', b.type === 'APPOINTMENT' ? 'APPOINTMENT' : 'TASK', t.id);
+        else
+            db.prepare('INSERT INTO tasks(lead_id,title,assignee_id,due_date,scheduled_at,case_event_id,category,status) VALUES(?,?,?,?,?,?,?,?)').run(l.id, b.title.trim(), l.assigned_to || q.user.id, due, when, id, b.type === 'APPOINTMENT' ? 'APPOINTMENT' : 'TASK', b.status === 'DONE' ? 'DONE' : 'PENDING');
+    }
+    else if (t)
+        db.prepare("UPDATE tasks SET status='DONE',due_date=NULL,scheduled_at=NULL,category='TASK' WHERE id=?").run(t.id); log(q, l.id, 'CASE_EVENT_SAVED', { id, type: b.type, title: b.title }); if (b.client_visible !== false)
+        notify(l.id, 'ECC application milestone', `${b.title}\n${b.details}\n${when || b.due_date || ''}`); })(); s.json({ ok: true }); }
+    v1.post('/workflow/:id/case-events', auth(), guard((q: HttpRequest, s: HttpResponse) => saveEvent(q, s, null)));
+    v1.patch('/workflow/:id/case-events/:event', auth(), guard((q: HttpRequest, s: HttpResponse) => { const e = db.prepare('SELECT * FROM case_events WHERE id=? AND lead_id=?').get(q.params.event, q.params.id); if (!e)
+        return fail(s, 'NOT_FOUND', 404); return saveEvent(q, s, e); }));
+    v1.post('/workflow/:id/invoices', finance, guard((q: HttpRequest, s: HttpResponse) => { const l = requireLead(q.params.id, true), b = q.body; if (!text(b.description, 500) || !date(b.due_date) || !(/^[A-Z]{3}$/).test(b.currency) || !Array.isArray(b.items) || !b.items.length || b.items.length > 100)
+        return fail(s, 'INVOICE_DETAILS_REQUIRED'); const items = b.items.map((i: any) => { if (!text(i.description, 500) || !Number.isInteger(i.quantity) || i.quantity < 1 || i.quantity > 100)
+        throw Error('INVALID_INVOICE_ITEM'); const unit = cents(i.amount); return { description: i.description.trim(), quantity: i.quantity, unit_cents: unit, amount_cents: unit * i.quantity }; }), total = items.reduce((n: any, i: any) => n + i.amount_cents, 0); const id = db.transaction(() => { const id = db.prepare('INSERT INTO charges(lead_id,description,amount_cents,currency,due_date) VALUES(?,?,?,?,?)').run(l.id, b.description.trim(), total, b.currency, b.due_date).lastInsertRowid; db.prepare('UPDATE charges SET invoice_no=? WHERE id=?').run(`ECC-INV-${new Date().getFullYear()}-${String(id).padStart(5, '0')}`, id); const ins = db.prepare('INSERT INTO invoice_items(charge_id,description,quantity,unit_cents,amount_cents) VALUES(?,?,?,?,?)'); items.forEach((i: any) => ins.run(id, i.description, i.quantity, i.unit_cents, i.amount_cents)); schedule(id, b.installments?.length ? b.installments : [{ label: 'Full payment', amount: total / 100, due_date: b.due_date }], total); log(q, l.id, 'INVOICE_ISSUED', { id, amount_cents: total, currency: b.currency }); notify(l.id, 'ECC invoice issued', `Invoice ECC-INV-${new Date().getFullYear()}-${String(id).padStart(5, '0')}: ${b.currency} ${(total / 100).toFixed(2)}, due ${b.due_date}.`, 'invoice-' + id); return id; })(); s.status(201).json({ id }); }));
+    v1.post('/workflow/:id/invoices/:invoice/schedule', finance, guard((q: HttpRequest, s: HttpResponse) => { const invoice = db.prepare("SELECT * FROM charges WHERE id=? AND lead_id=? AND status='ISSUED'").get(q.params.invoice, q.params.id); if (!invoice)
+        return fail(s, 'ISSUED_INVOICE_REQUIRED'); db.transaction(() => { schedule(invoice.id, q.body.installments, invoice.amount_cents); log(q, invoice.lead_id, 'PAYMENT_SCHEDULE_UPDATED', { invoice_id: invoice.id }); notify(invoice.lead_id, 'ECC payment schedule updated', 'Your invoice payment schedule has been updated. Please review it in your portal.'); })(); s.json({ ok: true }); }));
+    v1.post('/workflow/:id/invoices/:invoice/void', finance, guard((q: HttpRequest, s: HttpResponse) => { const invoice = finances(q.params.id).find((i: any) => i.id === Number(q.params.invoice)); if (!invoice || invoice.status === 'VOID' || invoice.paid_cents !== 0 || !text(q.body.reason, 2000))
+        return fail(s, 'REFUND_PAYMENTS_AND_PROVIDE_VOID_REASON'); db.transaction(() => { db.prepare("UPDATE charges SET status='VOID' WHERE id=?").run(invoice.id); log(q, q.params.id, 'INVOICE_VOIDED', { id: invoice.id, reason: q.body.reason }); notify(q.params.id, 'ECC invoice voided', `${invoice.invoice_no}: ${q.body.reason}`); })(); s.json({ ok: true }); }));
+    v1.post('/workflow/:id/payments/:payment/refunds', finance, guard((q: HttpRequest, s: HttpResponse) => { const p = db.prepare('SELECT p.*,c.lead_id,c.currency FROM payments p JOIN charges c ON c.id=p.charge_id WHERE p.id=? AND c.lead_id=?').get(q.params.payment, q.params.id), b = q.body; if (!p)
+        return fail(s, 'PAYMENT_NOT_FOUND', 404); if (db.prepare('SELECT payment_id FROM provider_payments WHERE payment_id=?').get(p.id))
+        return fail(s, 'ONLINE_PAYMENT_REQUIRES_PROVIDER_REFUND'); if (!text(b.reference, 200) || !text(b.reason, 2000) || !date(b.refunded_on))
+        return fail(s, 'REFUND_REFERENCE_REASON_AND_DATE_REQUIRED'); const amount = cents(b.amount); const id = db.transaction(() => { if (db.prepare('SELECT id FROM refunds WHERE payment_id=? AND reference=?').get(p.id, b.reference))
+        throw Error('REFUND_REFERENCE_ALREADY_USED'); const prior = db.prepare('SELECT COALESCE(SUM(amount_cents),0) n FROM refunds WHERE payment_id=?').get(p.id).n; if (amount + prior > p.amount_cents)
+        throw Error('REFUND_EXCEEDS_PAYMENT'); const id = db.prepare('INSERT INTO refunds(payment_id,amount_cents,reference,reason,refunded_on,created_by) VALUES(?,?,?,?,?,?)').run(p.id, amount, b.reference.trim(), b.reason.trim(), b.refunded_on, q.user.id).lastInsertRowid; log(q, p.lead_id, 'REFUND_RECORDED', { id, reference: b.reference, amount_cents: amount, currency: p.currency, reason: b.reason }); return id; })(); s.status(201).json({ id }); }));
+    function sendMessage(q: HttpRequest, s: HttpResponse, l: any, client: any) { if (!text(q.body.body, 10000))
+        return fail(s, 'MESSAGE_REQUIRED'); const id = db.transaction(() => { const id = db.prepare('INSERT INTO messages(lead_id,sender_role,sender_name,body) VALUES(?,?,?,?)').run(l.id, client ? 'client' : 'staff', client ? l.full_name : q.user.name, q.body.body.trim()).lastInsertRowid; log(q, l.id, 'MESSAGE_SENT', { id, sender: client ? 'client' : 'staff' }); if (client)
+        staffNotify(l.id, 'ECC client message', l.full_name + ' sent a message.', 'message-' + id);
+    else
+        notify(l.id, 'ECC message for you', 'Your ECC team sent you a message. Please open your private portal to read it.', 'message-' + id); return id; })(); s.status(201).json({ id }); }
+    v1.post('/workflow/:id/messages', auth(), guard((q: HttpRequest, s: HttpResponse) => sendMessage(q, s, requireLead(q.params.id), false)));
+    v1.post('/portal/messages', portal, guard((q: HttpRequest, s: HttpResponse) => sendMessage(q, s, q.client, true)));
+    const correctionFields = { full_name: 'Full Name', email: 'Email Address', phone: 'Phone Number', origin_country: 'Country', citizenship: 'Citizenship', city: 'City', state: 'State / Province', postal_code: 'Zip / Postal Code' };
+    v1.post('/portal/corrections', portal, guard((q: HttpRequest, s: HttpResponse) => { const changes = q.body.changes; if (!changes || Array.isArray(changes) || typeof changes !== 'object' || !Object.keys(changes).length || Object.keys(changes).some(k => !Object.hasOwn(correctionFields, k) || !text(changes[k], 500)))
+        return fail(s, 'VALID_DETAIL_CHANGES_REQUIRED'); if (changes.email && !/^\S+@\S+\.\S+$/.test(changes.email))
+        return fail(s, 'INVALID_EMAIL'); const id = db.transaction(() => { const id = db.prepare('INSERT INTO correction_requests(lead_id,changes) VALUES(?,?)').run(q.client.id, JSON.stringify(changes)).lastInsertRowid; staffNotify(q.client.id, 'ECC detail correction requested', q.client.full_name + ' requested a profile correction.', 'correction-' + id); log(q, q.client.id, 'CORRECTION_REQUESTED', { id, fields: Object.keys(changes) }); return id; })(); s.status(201).json({ id }); }));
+    v1.post('/workflow/:id/corrections/:correction/decision', auth(), guard((q: HttpRequest, s: HttpResponse) => { const r = db.prepare("SELECT * FROM correction_requests WHERE id=? AND lead_id=? AND status='PENDING'").get(q.params.correction, q.params.id); if (!r)
+        return fail(s, 'PENDING_REQUEST_REQUIRED'); const b = q.body; if (!['APPROVED', 'REJECTED'].includes(b.status) || (b.status === 'REJECTED' && !text(b.notes, 2000)))
+        return fail(s, 'DECISION_AND_REJECTION_REASON_REQUIRED'); db.transaction(() => { if (b.status === 'APPROVED') {
+        const changes = JSON.parse(r.changes), l = lead(r.lead_id), overrides = JSON.parse(l.profile_overrides || '{}');
+        for (const [k, v] of Object.entries<any>(changes)) {
+            if (['full_name', 'email', 'phone', 'origin_country'].includes(k))
+                db.prepare(`UPDATE leads SET ${k}=? WHERE id=?`).run(k === 'email' ? v.trim().toLowerCase() : v.trim(), l.id);
+            overrides[k] = v.trim();
+        }
+        if (changes.phone)
+            db.prepare('UPDATE leads SET phone_normalized=? WHERE id=?').run(changes.phone.replace(/\D/g, ''), l.id);
+        db.prepare('UPDATE leads SET profile_overrides=? WHERE id=?').run(JSON.stringify(overrides), l.id);
+    } db.prepare('UPDATE correction_requests SET status=?,review_notes=?,reviewed_by=? WHERE id=?').run(b.status, String(b.notes || ''), q.user.id, r.id); log(q, r.lead_id, 'CORRECTION_' + b.status, { id: r.id }); notify(r.lead_id, 'ECC profile correction ' + b.status.toLowerCase(), b.status === 'APPROVED' ? 'Your requested details have been updated. The originally signed application is retained.' : b.notes); })(); s.json({ ok: true }); }));
+    v1.post('/portal/proposals/:proposal/decision', portal, guard((q: HttpRequest, s: HttpResponse) => { const p = db.prepare("SELECT * FROM proposals WHERE id=? AND lead_id=? AND status='APPROVED' AND sent_at IS NOT NULL").get(q.params.proposal, q.client.id), b = q.body; if (!p)
+        return fail(s, 'SENT_APPROVED_PROPOSAL_REQUIRED'); if (p.customer_status === 'ACCEPTED')
+        return fail(s, 'PROPOSAL_ALREADY_ACCEPTED'); if (!['ACCEPTED', 'CHANGES_REQUESTED'].includes(b.status) || (b.status === 'ACCEPTED' && (!text(b.name, 200) || b.confirmed !== true)) || (b.status === 'CHANGES_REQUESTED' && !text(b.notes, 5000)))
+        return fail(s, 'ACCEPTANCE_NAME_AND_CONFIRMATION_OR_CHANGE_NOTES_REQUIRED'); db.transaction(() => { db.prepare('UPDATE proposals SET customer_status=?,customer_notes=?,accepted_name=?,accepted_at=? WHERE id=?').run(b.status, String(b.notes || ''), b.status === 'ACCEPTED' ? b.name.trim() : null, b.status === 'ACCEPTED' ? new Date().toISOString() : null, p.id); log(q, q.client.id, 'CUSTOMER_PROPOSAL_' + b.status, { proposal_id: p.id, name: b.name || null }); staffNotify(q.client.id, 'ECC proposal ' + b.status.toLowerCase(), q.client.full_name + ' responded to proposal #' + p.id); })(); s.json({ ok: true }); }));
+    // Paginated record libraries use the same assigned-case scope as lead and workflow screens.
+    v1.get('/workspace/records/:kind', auth(), guard((q: HttpRequest, s: HttpResponse) => {
+        const kinds = {
+            documents: { from: 'documents r JOIN leads l ON l.id=r.lead_id', fields: 'r.id,r.lead_id,r.name,r.mime,r.kind,r.status,r.expires_on,r.created_at', search: 'r.name', status: "CASE WHEN r.expires_on IS NOT NULL AND r.expires_on<date('now') THEN 'EXPIRED' ELSE r.status END" },
+            proposals: { from: 'proposals r JOIN leads l ON l.id=r.lead_id', fields: 'r.id,r.lead_id,r.revision,r.currency,r.items,r.status,r.customer_status,r.sent_at', search: 'CAST(r.id AS TEXT)', status: 'r.status' },
+            invoices: { from: 'charges r JOIN leads l ON l.id=r.lead_id', fields: 'r.id,r.lead_id,r.invoice_no,r.description,r.currency,r.amount_cents,r.status,r.due_date,r.created_at', search: 'r.invoice_no', status: 'r.status' },
+            payments: { from: 'payments r JOIN charges ch ON ch.id=r.charge_id JOIN leads l ON l.id=ch.lead_id', fields: "r.id,ch.lead_id,r.receipt_no,r.reference,r.amount_cents,r.paid_at,ch.currency,ch.invoice_no,'PAID' AS status", search: 'r.receipt_no||r.reference', status: "'PAID'" }
+        }, kind = q.params.kind, config = Object.hasOwn(kinds, kind) ? (kinds as any)[kind] : null;
+        if (!config)
+            return fail(s, 'RECORD_LIBRARY_NOT_FOUND', 404);
+        const page = Number(q.query.page || 1);
+        if (!Number.isSafeInteger(page) || page < 1 || page > 1000000)
+            return fail(s, 'INVALID_PAGE');
+        const scope = q.scope_user || null, w = ['(? IS NULL OR l.assigned_to=? OR EXISTS(SELECT 1 FROM tasks t WHERE t.lead_id=l.id AND t.assignee_id=?))'], params: any[] = [scope, scope, scope];
+        if (q.query.search) {
+            w.push('(l.full_name LIKE ? OR l.reference_no LIKE ? OR l.country_of_interest LIKE ? OR ' + config.search + ' LIKE ?)');
+            params.push(...Array(4).fill('%' + String(q.query.search).slice(0, 200) + '%'));
+        }
+        if (q.query.status) {
+            w.push(config.status + '=?');
+            params.push(String(q.query.status).slice(0, 50));
+        }
+        if (q.query.purpose) {
+            if (!['TOURIST', 'STUDY', 'WORK', 'RESIDENCY'].includes(q.query.purpose))
+                return fail(s, 'INVALID_PURPOSE');
+            w.push('l.application_type=?');
+            params.push(q.query.purpose);
+        }
+        const where = ' WHERE ' + w.join(' AND '), total = db.prepare('SELECT COUNT(*) total FROM ' + config.from + where).get(...params).total;
+        let rows = db.prepare('SELECT ' + config.fields + ',l.full_name,l.reference_no,l.country_of_interest,l.application_type FROM ' + config.from + where + ' ORDER BY r.id DESC LIMIT 20 OFFSET ?').all(...params, (page - 1) * 20);
+        if (kind === 'documents')
+            rows = rows.map((r: any) => ({ ...r, effective_status: r.expires_on && r.expires_on < today() ? 'EXPIRED' : r.status }));
+        if (kind === 'proposals')
+            rows = rows.map(({ items, ...r }: any) => ({ ...r, amount_cents: JSON.parse(items).reduce((n: any, i: any) => n + i.amount_cents, 0) }));
+        if (kind === 'invoices')
+            rows = rows.map((r: any) => { const paid = db.prepare('SELECT COALESCE(SUM(p.amount_cents-(SELECT COALESCE(SUM(f.amount_cents),0) FROM refunds f WHERE f.payment_id=p.id)),0) paid FROM payments p WHERE p.charge_id=?').get(r.id).paid; return { ...r, invoice_no: r.invoice_no || 'ECC-INV-' + r.id, paid_cents: paid, balance_cents: r.status === 'VOID' ? 0 : r.amount_cents - paid }; });
+        s.json({ rows, total, page });
+    }));
+    v1.get('/dashboard', auth(), (q: HttpRequest, s: HttpResponse) => s.json((require('./reporting') as typeof import('./reporting'))(db, c, q.scope_user).dashboard));
+    v1.get('/reports', auth(), (q: HttpRequest, s: HttpResponse) => s.json((require('./reporting') as typeof import('./reporting'))(db, c, q.scope_user).reports));
+    v1.get('/reports/leads.csv', auth(), (q: HttpRequest, s: HttpResponse) => { const rows = db.prepare('SELECT l.reference_no,l.full_name,l.email,l.phone,l.country_of_interest,l.application_type,l.status,u.full_name assignee,l.closed_reason,l.created_at FROM leads l LEFT JOIN users u ON u.id=l.assigned_to WHERE (? IS NULL OR l.assigned_to=? OR EXISTS(SELECT 1 FROM tasks WHERE lead_id=l.id AND assignee_id=?)) ORDER BY l.id DESC').all(q.scope_user, q.scope_user, q.scope_user), keys = ['reference_no', 'full_name', 'email', 'phone', 'country_of_interest', 'application_type', 'status', 'assignee', 'closed_reason', 'created_at']; const csv = (v: any) => '"' + String(v ?? '').replace(/^\s*[=+@\-]/, "'$&").replaceAll('"', '""') + '"'; s.set({ 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': 'attachment; filename="ecc-leads.csv"', 'Cache-Control': 'no-store' }).send([keys.map(csv).join(','), ...rows.map((r: any) => keys.map(k => csv(r[k])).join(','))].join('\r\n')); });
+};
+export = service;

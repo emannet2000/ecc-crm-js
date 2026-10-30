@@ -1,6 +1,6 @@
 const {test}=require('node:test');const assert=require('node:assert/strict');const path=require('node:path');const harness=require('./support/http.cjs');
 test('advanced workflows, snapshots, reconciliation, qualifications and language selection',async t=>{
- const h=harness(t),{db,req,login}=h,{advanced}=require('../server');process.env.BACKUP_DIR=path.join(path.dirname(db.name),'backups');t.after(()=>delete process.env.BACKUP_DIR);
+ const h=harness(t),{db,req,login}=h,{advanced}=require('../dist/server');process.env.BACKUP_DIR=path.join(path.dirname(db.name),'backups');t.after(()=>delete process.env.BACKUP_DIR);
  const admin=await login('admin@ecc.example'),agent=await login('cristina@ecc.example');
  const post=(p,b={},token=admin,status=200)=>req(p,{method:'POST',body:b,token,status});
  const create=async name=>(await post('/leads',{full_name:name,email:name+'@test.example',country_of_interest:'Spain',application_type:'WORK',assigned_to:1},admin,201)).id;

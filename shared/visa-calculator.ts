@@ -1,0 +1,64 @@
+import type {Pricing,CalculatorSelection,CalculatorRow,CostRow,ProposalItem,Purpose} from './pricing-types';
+import pricing = require('./pricing-data');
+function createCalculator(pricing: Pricing) {
+    const purposeMap: Record<string, 'tourist'|'student'|'work'|'residency'> = { TOURIST: 'tourist', STUDY: 'student', WORK: 'work', RESIDENCY: 'residency' };
+    function catalog(country: string, purpose: Purpose) { const entry = Object.entries(pricing.data).find(([, c]) => c.label === country), key = purposeMap[purpose]; if (!entry || !key)
+        throw Error('UNSUPPORTED_COUNTRY_OR_PATHWAY'); const [countryKey, c] = entry, p = c.pathways[key]; return { countryKey, purpose, country: c.label, title: p.title, note: p.note, processor: c.processor, coverage: [...p.coverage], packages: pricing.packageData[countryKey] || pricing.packageData.default, benchmark: pricing.competitorBenchmarks[countryKey], rows: [...p.rows.map((r: any, i: any) => row('base' + i, r, false)), ...Object.entries(p.addOns || {}).map(([k, r]) => row('addon-' + k, r, true))] }; }
+    function row(key: string, r: CostRow, optional: boolean): CalculatorRow { return { key, description: r[0], low: r[1], high: r[2], plus: r[3] === true, note: r[4] || '', optional, numeric: Number.isFinite(r[1]) && Number.isFinite(r[2]), budgetOnly: /proof of|living funds|financial capacity/i.test(r[0]), billableDefault: /^ECC\b/.test(r[0]) }; }
+    function cents(x: unknown) { if ((typeof x !== 'number' && typeof x !== 'string') || String(x).trim() === '' || !Number.isFinite(Number(x)) || Number(x) < 0 || Number(x) > 100000000 || Math.abs(Number(x) * 100 - Math.round(Number(x) * 100)) > 0.00001)
+        throw Error('INVALID_COST_AMOUNT'); return Math.round(Number(x) * 100); }
+    function calculate(country: string, purpose: Purpose, selections: CalculatorSelection[] = [], requireQuote = false) {
+        const c = catalog(country, purpose);
+        if (!Array.isArray(selections) || selections.length > c.rows.length)
+            throw Error('INVALID_CALCULATOR_SELECTIONS');
+        const saved = new Map<string, CalculatorSelection>();
+        for (const s of selections) {
+            if (!s || !c.rows.some(r => r.key === s.key) || saved.has(s.key))
+                throw Error('INVALID_CALCULATOR_ROW');
+            if ('included' in s && typeof s.included !== 'boolean' || 'billable' in s && typeof s.billable !== 'boolean')
+                throw Error('INVALID_CALCULATOR_SELECTION');
+            saved.set(s.key, s);
+        }
+        let low = 0, high = 0, plus = false, quoteTotal = 0, payable = 0;
+        const items: ProposalItem[] = [];
+        const rows = c.rows.map(r => {
+            const s = saved.get(r.key) || {key:r.key}, included = r.numeric ? (s.included ?? !r.optional) : false;
+            if (!r.numeric) {
+                if (s.billable || s.amount !== undefined || s.low !== undefined || s.high !== undefined)
+                    throw Error('NON_NUMERIC_COST_CANNOT_BE_CHARGED');
+                return { ...r, included: false };
+            }
+            const lo = cents(s.low ?? r.low), hi = cents(s.high ?? r.high);
+            if (lo > hi)
+                throw Error('LOW_COST_MUST_NOT_EXCEED_HIGH_COST');
+            const qty = s.quantity ?? 1;
+            if (!Number.isInteger(qty) || qty < 1 || qty > 100)
+                throw Error('INVALID_QUANTITY');
+            let quoted = null;
+            if (included && (requireQuote || s.amount !== undefined && s.amount !== ''))
+                quoted = cents(s.amount);
+            const billable = r.budgetOnly ? false : (s.billable ?? r.billableDefault);
+            if (r.budgetOnly && s.billable)
+                throw Error('PROOF_OF_FUNDS_IS_NOT_PAYABLE_TO_ECC');
+            if (included) {
+                low += lo * qty;
+                high += hi * qty;
+                plus = plus || r.plus;
+                if (quoted !== null) {
+                    const total = quoted * qty;
+                    quoteTotal += total;
+                    if (billable)
+                        payable += total;
+                    items.push({ description: r.description + (qty > 1 ? ` × ${qty}` : ''), amount_cents: total, billable, key: r.key });
+                }
+            }
+            return { key: r.key, description: r.description, optional: r.optional, numeric: true, included, quantity: qty, low_cents: lo, high_cents: hi, plus: r.plus, quoted_cents: quoted, billable, budgetOnly: r.budgetOnly, note: r.note };
+        });
+        if (requireQuote && (!items.length || quoteTotal <= 0))
+            throw Error('POSITIVE_QUOTE_REQUIRED');
+        return { version: pricing.version, source: pricing.source, disclaimer: pricing.disclaimer, country: c.country, purpose: c.purpose, title: c.title, note: c.note, processor: c.processor, coverage: c.coverage, currency: 'AED', rows, low_cents: low, high_cents: high, plus, quote_total_cents: quoteTotal, payable_cents: payable, items };
+    }
+    return { catalog, calculate, withPricing: createCalculator };
+}
+const calculator = createCalculator(pricing);
+export = calculator;

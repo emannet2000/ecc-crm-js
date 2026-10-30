@@ -48,3 +48,28 @@ backups/
 
 # Generated React interface
 public/assets/
+
+# Compiled TypeScript server and declarations
+dist/
+*.tsbuildinfo
+
+# Dependencies
+node_modules/
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Local databases
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+
+# Runtime data and test output
+var/
+test-results/
+*.log

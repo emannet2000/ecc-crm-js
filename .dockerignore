@@ -8,3 +8,15 @@ backups
 *.sqlite-*
 *.enc
 test-results
+
+dist
+
+# Local credentials and development metadata
+.aws
+.codex
+.agents
+*.db
+*.db-*
+*.sqlite3
+*.sqlite3-*
+*.log

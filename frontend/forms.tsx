@@ -1,0 +1,69 @@
+import React, { useState, useRef, useEffect, createContext, useContext } from 'react';
+import { Button, Panel, label, api } from './ui';
+export const ReadOnlyForms = createContext<any>(false);
+export function Field({ name, title, type = 'text', value, options, required = false, wide = false, ...props }: any) {
+    const id = React.useId();
+    return <label className={wide ? 'wide' : ''} htmlFor={id}>{title || label(name)}{type === 'textarea' ? <textarea id={id} name={name} defaultValue={value ?? ''} required={required} rows={4} {...props}/> : type === 'checkbox' ? <input id={id} name={name} type="checkbox" required={required} defaultChecked={!!value} {...props}/> : options ? <select id={id} aria-label={title || label(name)} name={name} defaultValue={value ?? ''} required={required} {...props}>{options.map((o: any) => { const v = typeof o === 'object' ? o.value : o; return <option value={v} key={v} disabled={typeof o==='object'&&!!o.disabled}>{typeof o === 'object' ? o.label : label(o)}</option>; })}</select> : <input id={id} name={name} type={type} defaultValue={value ?? ''} required={required} {...props}/>}</label>;
+}
+export interface FormProps {children:React.ReactNode;onSave:(body:Record<string,string>,form:HTMLFormElement)=>unknown|Promise<unknown>;submit?:string;initial?:Record<string,unknown>;id?:string;onDone?:(result:any)=>void;success?:string;compact?:boolean;disabled?:boolean}
+export function Form({ children, onSave, submit = 'Save', initial = {}, id, onDone, success, compact = false, disabled = false }: FormProps) {
+    const readOnly = useContext(ReadOnlyForms);
+    const [error, setError] = useState(''), [busy, setBusy] = useState(false), [message, setMessage] = useState('');
+    return <form id={id} className={'form-grid ' + (compact ? 'compact-form' : '')} onSubmit={async (e) => { e.preventDefault(); const form = e.currentTarget; setBusy(true); setError(''); setMessage(''); try {
+        const body = Object.fromEntries(new FormData(form)) as Record<string,string>;
+        const result = await onSave(body, form);
+        setMessage(success || 'Saved successfully.');
+        onDone?.(result);
+    }
+    catch (e: any) {
+        setError(e.message);
+    }
+    finally {
+        setBusy(false);
+    } }}><fieldset disabled={busy || disabled || readOnly} className="form-fields">{children}{error && <p className="form-error wide" role="alert">{error}</p>}{message && <p className="form-success wide" role="status">{message}</p>}<Button primary disabled={busy || disabled || readOnly}>{busy ? 'Saving…' : submit}</Button></fieldset></form>;
+}
+export function Action({ children, onRun, onDone, disabled, primary = false, confirm, ...props }: any) { const [busy, setBusy] = useState(false), [error, setError] = useState(''), [ready, setReady] = useState(false), [result, setResult] = useState(''); return <span className="action-control"><Button type="button" {...props} primary={primary} disabled={disabled || busy} onClick={async () => { if (confirm && !ready) {
+    setReady(true);
+    return;
+} setBusy(true); setError(''); try {
+    const r = await onRun();
+    setReady(false);
+    setResult('Completed.');
+    onDone?.(r);
+}
+catch (e: any) {
+    setError(e.message);
+}
+finally {
+    setBusy(false);
+} }}>{busy ? 'Working…' : ready ? 'Confirm: ' + children : children}</Button>{ready && <span className="confirmation"><span>{confirm}</span><button type="button" className="text-link" onClick={() => setReady(false)}>Cancel</button></span>}{error && <small role="alert" className="form-error">{error}</small>}{result && !onDone && <small role="status" className="form-success">{result}</small>}</span>; }
+export const asNumber = (b: any) => Object.fromEntries(Object.entries<any>(b).map(([k, v]) => [k, Number(v)]));
+export async function readFile(file: any, max = 5 * 1024 * 1024) { if (!file || file.size > max)
+    throw Error('Choose a file up to ' + max / 1024 / 1024 + ' MB.'); return new Promise<{name:string;mime:string;data:string}>((resolve, reject) => { const r = new FileReader(); r.onerror = () => reject(Error('Cannot read this file.')); r.onload = () => resolve({ name: file.name, mime: file.type, data: (r.result as string).split(',')[1] }); r.readAsDataURL(file); }); }
+export async function fileBlob(path: any, headers:Record<string,string> = {}) { const r = await fetch('/v1' + path, { headers: { ...(!headers['X-Portal-Token'] && localStorage.tok ? { Authorization: 'Bearer ' + localStorage.tok } : {}), ...headers } }); if (!r.ok) {
+    const d = await r.json().catch(() => ({}));
+    throw Error(label(d.error || 'Download failed'));
+} return r.blob(); }
+export function saveBlob(blob: any, name: any) { const url = URL.createObjectURL(blob), a = document.createElement('a'); a.href = url; a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(url), 1000); }
+export async function download(path: any, name: any, headers:Record<string,string> = {}) { saveBlob(await fileBlob(path, headers), name); }
+export const post = (path: any, body = {}) => api(path, { method: 'POST', body });
+export const sections = { service_scope: 'Service scope', payment_schedule: 'Payment schedule and conditions', exclusions: 'Exclusions', cancellation_terms: 'Cancellation and refund terms', ecc_signatory: 'ECC authorized signatory' };
+export const signOut = () => { localStorage.removeItem('tok'); localStorage.removeItem('me'); dispatchEvent(new Event('ecc-session')); location.hash = '#/login'; };
+export function printElement(element: any, title = 'ECC Consulting Global') { const popup = window.open('', '_blank'); if (!popup)
+    throw Error('Allow popups to print this document.'); popup.document.title = title; const style = popup.document.createElement('style'); style.textContent = 'body{font:14px Arial;color:#142244;max-width:900px;margin:35px auto;padding:20px}table{width:100%;border-collapse:collapse}th,td{padding:10px;border-bottom:1px solid #ddd;text-align:left}h1,h2{color:#142334}button,.no-print{display:none!important}.invoice-brand{border-bottom:3px solid #b18a3d;padding:20px 0;margin-bottom:25px}.invoice-totals{text-align:right;margin-top:25px}img{max-width:100%;max-height:180px}p{white-space:pre-wrap}.document-sheet{padding:25px}dl{display:grid;grid-template-columns:180px 1fr;gap:10px}dd{margin:0}'; popup.document.head.append(style); popup.document.body.append(element.cloneNode(true)); popup.document.close(); setTimeout(() => popup.print(), 100); }
+export function Signature({ onChange }: any) { const ref = useRef<any>(undefined), drawing = useRef<any>(false); useEffect(() => { const canvas = ref.current, ctx = canvas.getContext('2d')!; ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, canvas.width, canvas.height); ctx.strokeStyle = '#142334'; ctx.lineWidth = 2.5; ctx.lineCap = 'round'; }, []); function point(e: any): [number,number] { const r = ref.current.getBoundingClientRect(); return [(e.clientX - r.left) * ref.current.width / r.width, (e.clientY - r.top) * ref.current.height / r.height]; } return <div className="signature-field wide"><canvas ref={ref} width="800" height="200" aria-label="Agreement signature" onPointerDown={e => { e.preventDefault(); drawing.current = true; e.currentTarget.setPointerCapture(e.pointerId); const ctx = e.currentTarget.getContext('2d')!, [x, y] = point(e); ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x + .1, y + .1); ctx.stroke(); }} onPointerMove={e => { if (drawing.current) {
+    const ctx = e.currentTarget.getContext('2d')!;
+    ctx.lineTo(...point(e));
+    ctx.stroke();
+} }} onPointerUp={() => { drawing.current = false; onChange(ref.current.toDataURL('image/png')); }} onPointerCancel={() => { drawing.current = false; onChange(ref.current.toDataURL('image/png')); }}/><Button type="button" onClick={() => { const c = ref.current; c.getContext('2d')!.fillRect(0, 0, c.width, c.height); onChange(''); }}>Clear Signature</Button><Field name="signature_image" title="Or upload signature image" type="file" accept="image/png,image/jpeg,image/webp" onChange={async (e: any) => { const input = e.currentTarget; try {
+    const file = await readFile(input.files[0], 1048576);
+    const image = new Image();
+    image.onload = () => { const c = ref.current, ctx = c.getContext('2d')!; ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, c.width, c.height); const scale = Math.min(c.width / image.width, c.height / image.height); ctx.drawImage(image, (c.width - image.width * scale) / 2, (c.height - image.height * scale) / 2, image.width * scale, image.height * scale); onChange(c.toDataURL('image/png')); };
+    image.src = 'data:' + file.mime + ';base64,' + file.data;
+}
+catch (e: any) {
+    input.setCustomValidity(e.message);
+    input.reportValidity();
+} }}/></div>; }
+export function RowsEditor({ rows, onChange, columns, addLabel = 'Add item' }: any) { return <div className="rows-editor wide"><div className="table-wrap"><table><thead><tr>{columns.map((c: any) => <th key={c.key}>{c.title}</th>)}<th>Remove</th></tr></thead><tbody>{rows.map((r: any, i: any) => <tr key={i}>{columns.map((c: any) => <td key={c.key}>{c.options ? <select aria-label={c.title + ' ' + (i + 1)} required={c.required !== false} value={r[c.key] ?? ''} onChange={e => onChange(rows.map((v: any, j: any) => i === j ? { ...v, [c.key]: e.target.value } : v))}><option value="">Select</option>{c.options.map((o: any) => <option key={o.value} value={o.value}>{o.label}</option>)}</select> : <input aria-label={c.title + ' ' + (i + 1)} type={c.type || 'text'} min={c.min} step={c.step} required={c.required !== false} value={r[c.key] ?? ''} onChange={e => onChange(rows.map((v: any, j: any) => i === j ? { ...v, [c.key]: e.target.value } : v))}/>}</td>)}<td><Button type="button" aria-label={'Remove item ' + (i + 1)} onClick={() => onChange(rows.filter((_: any, j: any) => i !== j))}>×</Button></td></tr>)}</tbody></table></div><Button type="button" onClick={() => onChange([...rows, Object.fromEntries(columns.map((c: any) => [c.key, c.default ?? '']))])}>{addLabel}</Button></div>; }
+export function DetailList({ value }: any) { return <dl className="details-grid">{Object.entries<any>(value || {}).map(([key, v]) => <React.Fragment key={key}><dt>{label(key)}</dt><dd>{typeof v === 'object' ? Array.isArray(v) ? v.map(x => typeof x === 'object' ? Object.values<any>(x).join(' · ') : String(x)).join(', ') : Object.entries<any>(v || {}).map(([k, x]) => label(k) + ': ' + x).join(' · ') : String(v ?? '—')}</dd></React.Fragment>)}</dl>; }

@@ -2,18 +2,30 @@
   "name": "ecc-crm",
   "version": "0.1.0",
   "scripts": {
-    "start": "node server.js",
+    "prestart": "npm run build",
+    "start": "node dist/server.js",
     "test": "node --test test/*.test.cjs",
     "production:prepare": "node scripts/prepare-production.cjs",
     "security:bootstrap": "node scripts/bootstrap-admin.cjs",
     "backup": "node scripts/backup.cjs",
     "restore": "node scripts/restore.cjs",
     "test:browser": "node scripts/browser-acceptance.cjs",
-    "build": "node scripts/build-frontend.cjs",
+    "build": "npm run typecheck && npm run build:server && npm run build:ui",
     "dev:ui": "node scripts/build-frontend.cjs --watch",
     "test:react": "node scripts/react-acceptance.cjs",
     "test:admin": "node scripts/admin-acceptance.cjs",
-    "test:ui": "node scripts/test-ui.cjs"
+    "test:ui": "node scripts/test-ui.cjs",
+    "build:server": "node scripts/build-server.cjs",
+    "build:ui": "node scripts/build-frontend.cjs",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.browser.json",
+    "pretest": "npm run build",
+    "pretest:react": "npm run build:server",
+    "pretest:browser": "npm run build:server",
+    "pretest:admin": "npm run build:server",
+    "pretest:ui": "npm run build:server",
+    "presecurity:bootstrap": "node scripts/ensure-server.cjs",
+    "prebackup": "node scripts/ensure-server.cjs",
+    "prerestore": "node scripts/ensure-server.cjs"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
@@ -27,6 +39,14 @@
   },
   "devDependencies": {
     "@playwright/test": "^1.64.1",
-    "esbuild": "^0.28.2"
+    "@types/bcryptjs": "^2.4.6",
+    "@types/better-sqlite3": "^9.6.0",
+    "@types/express": "^4.17.25",
+    "@types/jsonwebtoken": "^9.0.10",
+    "@types/node": "^22.20.5",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "esbuild": "^0.28.2",
+    "typescript": "^5.9.3"
   }
 }
