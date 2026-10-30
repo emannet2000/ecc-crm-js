@@ -8,13 +8,25 @@
     "security:bootstrap": "node scripts/bootstrap-admin.cjs",
     "backup": "node scripts/backup.cjs",
     "restore": "node scripts/restore.cjs",
-    "test:browser": "node scripts/browser-acceptance.cjs"
+    "test:browser": "node scripts/browser-acceptance.cjs",
+    "build": "node scripts/build-frontend.cjs",
+    "dev:ui": "node scripts/build-frontend.cjs --watch",
+    "test:react": "node scripts/react-acceptance.cjs",
+    "test:admin": "node scripts/admin-acceptance.cjs",
+    "test:ui": "node scripts/test-ui.cjs"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
-    "better-sqlite3": "^11.3.0",
+    "better-sqlite3": "^11.10.0",
     "exceljs": "^4.4.0",
-    "express": "^4.19.2",
-    "jsonwebtoken": "^9.0.2"
+    "express": "^4.22.3",
+    "jsonwebtoken": "^9.0.2",
+    "lucide-react": "^1.64.0",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.64.1",
+    "esbuild": "^0.28.2"
   }
 }

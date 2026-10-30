@@ -1,0 +1,22 @@
+const {test}=require('node:test'),assert=require('node:assert/strict'),harness=require('./support/http.cjs');
+test('monthly financial charts separate currencies, refund dates, voids and assigned scope',async t=>{
+ const {db,req,login}=harness(t),admin=await login('admin@ecc.example'),staff=await login('cristina@ecc.example');
+ const post=(p,body,status=200)=>req(p,{method:'POST',body,token:admin,status});
+ const make=async(name,email,assigned,currency)=>{const lead=await post('/leads',{full_name:name,email,country_of_interest:'Spain',application_type:'TOURIST',assigned_to:assigned},201);db.prepare("UPDATE leads SET status='CLIENT' WHERE id=?").run(lead.id);const invoice=await post('/workflow/'+lead.id+'/invoices',{description:'Chart fixture',currency,due_date:'2026-01-30',items:[{description:'Service',quantity:1,amount:100}]},201);return {lead:lead.id,invoice:invoice.id}};
+ const own=await make('Chart Own','own@charts.example.test',1,'AED');
+ const p=await post('/workflow/'+own.lead+'/payments',{charge_id:own.invoice,amount:40,reference:'CHART-PAYMENT',paid_at:'2026-01-15'},201);
+ const payment=db.prepare('SELECT id FROM payments WHERE charge_id=?').get(own.invoice);
+ await post('/workflow/'+own.lead+'/payments/'+payment.id+'/refunds',{amount:10,reference:'CHART-REFUND',refunded_on:'2026-02-15',reason:'Refund dated independently of payment'},201);
+ const other=await make('Chart Other','other@charts.example.test',2,'USD');await post('/workflow/'+other.lead+'/payments',{charge_id:other.invoice,amount:50,reference:'OTHER-CHART-PAYMENT',paid_at:'2026-01-15'},201);
+ const scoped=await req('/reports',{token:staff}),jan=scoped.monthly_finances.find(r=>r.month==='2026-01'&&r.currency==='AED'),feb=scoped.monthly_finances.find(r=>r.month==='2026-02'&&r.currency==='AED');assert.equal(jan.paid_cents,4000);assert.equal(jan.net_paid_cents,4000);assert.equal(feb.refunded_cents,1000);assert.equal(feb.net_paid_cents,-1000);assert.equal(scoped.monthly_finances.some(r=>r.currency==='USD'),false);
+ const team=await req('/reports',{token:admin});assert.equal(team.monthly_finances.find(r=>r.month==='2026-01'&&r.currency==='USD').paid_cents,5000);
+ const extra=await post('/workflow/'+own.lead+'/invoices',{description:'Void chart fixture',currency:'AED',due_date:'2026-01-30',items:[{description:'Unused',quantity:1,amount:25}]},201);await post('/workflow/'+own.lead+'/invoices/'+extra.id+'/void',{reason:'Unused obligation'});const final=await req('/reports',{token:staff});assert.equal(final.monthly_finances.filter(r=>r.currency==='AED').reduce((n,r)=>n+r.invoiced_cents,0),10000);
+ const invoices=await req('/workspace/records/invoices',{token:staff});assert.equal(invoices.total,2);assert.equal(invoices.rows.every(r=>r.lead_id===own.lead),true);const issued=await req('/workspace/records/invoices?status=ISSUED',{token:staff});assert.equal(issued.total,1);assert.equal(issued.rows[0].paid_cents,3000);assert.equal(issued.rows[0].balance_cents,7000);
+ const payments=await req('/workspace/records/payments',{token:staff});assert.equal(payments.total,1);assert.equal(payments.rows[0].reference,'CHART-PAYMENT');assert.equal((await req('/workspace/records/payments?search=OTHER',{token:staff})).total,0);
+ for(const target of [own,other])await post('/workflow/'+target.lead+'/documents',{kind:'APPLICATION',name:'chart-document.pdf',mime:'application/pdf',data:Buffer.from('%PDF-1.4\nChart fixture').toString('base64')},201);
+ const docs=await req('/workspace/records/documents',{token:staff});assert.equal(docs.total,1);assert.equal(docs.rows[0].lead_id,own.lead);assert.equal('data' in docs.rows[0],false);
+ for(const target of [own,other])db.prepare('INSERT INTO proposals(lead_id,country,purpose,currency,items,terms) VALUES(?,?,?,?,?,?)').run(target.lead,'Spain','TOURIST','AED',JSON.stringify([{description:'Service',amount_cents:5000,billable:true}]),'Chart fixture');
+ const proposals=await req('/workspace/records/proposals',{token:staff});assert.equal(proposals.total,1);assert.equal(proposals.rows[0].amount_cents,5000);assert.equal('items' in proposals.rows[0],false);
+ await req('/workspace/records/constructor',{token:admin,status:404});await req('/workspace/records/invoices?page=-1',{token:staff,status:400});await req('/workspace/records/invoices?purpose=INVALID',{token:staff,status:400});assert.equal((await req('/workspace/records/documents?search='+encodeURIComponent("' OR 1=1 --"),{token:staff})).total,0);
+
+});

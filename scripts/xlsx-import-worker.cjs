@@ -9,9 +9,9 @@ const {parentPort,workerData}=require('node:worker_threads');
   if(size>8*1024*1024||expanded>16*1024*1024)throw Error('XLSX_EXPANDED_SIZE_LIMIT');
   const name=data.subarray(offset+46,offset+46+nameLength).toString();if(/vbaProject|externalLinks/i.test(name))throw Error('XLSX_MACROS_AND_EXTERNAL_LINKS_NOT_SUPPORTED');offset+=46+nameLength+extra+comment;
  }
- const Excel=require('exceljs'),workbook=new Excel.Workbook();await workbook.xlsx.load(data,{ignoreNodes:['drawing','picture','conditionalFormatting','dataValidations','sheetProtection']});
+ const Workbook=require('exceljs/lib/doc/workbook'),ValueType=require('exceljs/lib/doc/enums').ValueType,workbook=new Workbook();await workbook.xlsx.load(data,{ignoreNodes:['drawing','picture','conditionalFormatting','dataValidations','sheetProtection']});
  if(workbook.worksheets.length!==1)throw Error('XLSX_REQUIRES_ONE_WORKSHEET');const sheet=workbook.worksheets[0];
  if(sheet.rowCount>1001||sheet.columnCount>50)throw Error('XLSX_MAXIMUM_1000_DATA_ROWS_AND_50_COLUMNS');
- const rows=[];for(let i=1;i<=sheet.rowCount;i++){const row=[];for(let c=1;c<=sheet.columnCount;c++){const cell=sheet.getRow(i).getCell(c);if(cell.type===Excel.ValueType.Formula||cell.type===Excel.ValueType.Error)throw Error('XLSX_FORMULAS_AND_ERRORS_NOT_SUPPORTED');row.push(cell.text||'')}if(row.some(v=>v.trim()))rows.push(row)}
+ const rows=[];for(let i=1;i<=sheet.rowCount;i++){const row=[];for(let c=1;c<=sheet.columnCount;c++){const cell=sheet.getRow(i).getCell(c);if(cell.type===ValueType.Formula||cell.type===ValueType.Error)throw Error('XLSX_FORMULAS_AND_ERRORS_NOT_SUPPORTED');row.push(cell.text||'')}if(row.some(v=>v.trim()))rows.push(row)}
  const csv=rows.map(row=>row.map(v=>'"'+v.replaceAll('"','""')+'"').join(',')).join('\r\n');if(csv.length>2e6)throw Error('CSV_MAXIMUM_2MB');parentPort.postMessage({csv,headers:rows[0]||[],sheet:sheet.name});
  }catch(e){parentPort.postMessage({error:e.message})}})();

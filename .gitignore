@@ -45,3 +45,6 @@ var/
 uploads/
 backups/
 *.log
+
+# Generated React interface
+public/assets/

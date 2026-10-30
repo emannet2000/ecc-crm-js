@@ -1,8 +1,20 @@
 # ECC CRM
 
-Install dependencies with `npm install`, then run `npm start`. The default address is http://localhost:3000. Existing SQLite databases are migrated additively at startup; existing records are retained.
+Use Node.js 22, matching the existing SQLite native dependency. Install dependencies with `npm install`, build the React interface with `npm run build`, then run `npm start`. The default address is http://localhost:3000. Existing SQLite databases are migrated additively at startup; existing records are retained.
 
 To configure environment variables, copy `.env.example` to `.env`, supply the values, then run `node --env-file=.env server.js` (Node 22). `npm start` also accepts environment variables supplied by the hosting service or shell. Replace the demo credentials and development signing secret for a deployed instance.
+
+## React interface
+
+The React source lives in `frontend/` and uses the existing Express API and SQLite records. `npm run build` bundles it locally into `public/assets/`; no CDN or external frontend service is required. Run `npm run dev:ui` alongside `npm start` to rebuild on changes. Docker builds the interface automatically.
+
+The designs follow the 20 supplied ECC-CRM PNG references: dashboard, applications, profiles and activity, documents, tasks and meetings, finance, proposals, payments, invoices, reports, notifications, permissions, settings, and the client portal. Counts and charts use API data. Financial amounts stay separated by currency. Record screens scope data to the selected client.
+
+All staff and client workspace screens and transactional forms now use native React components: document upload/review/preview, calculation proposals and revision approval, electronic signatures, client conversion, invoices/installments, payments/refunds/receipts/checkout, case updates, messaging, bookings, account administration, MFA, provider settings, backups, pricing/templates, imports/automation, and advanced tools. No legacy workspace iframe is used. The original standalone `/workspace.html` remains available for compatibility, and the public application form remains at `/application.html`.
+
+The dashboard includes attention and management views. Reports include real monthly transaction charts with currencies kept separate; refunds are attributed to their refund dates. Calendars support monthly and weekly views with consultant filters. Provider-backed actions use the configured gateway; saving a provider name does not establish a live third-party connection.
+
+Run `npm run build`, then `npm run test:ui` for desktop/mobile navigation, the full inquiry-to-client signing/payment lifecycle, and native administration (including XLSX imports and MFA recovery). `npm run test:react`, `npm run test:browser`, and `npm run test:admin` run those checks individually. Use `npm test` for backend regression checks. Browser checks require `npx playwright install chromium --only-shell`; set `CHROMIUM_PATH` to use a compatible installed Chromium instead. Tests use temporary databases and do not modify existing CRM records.
 
 ## Portals and access
 
